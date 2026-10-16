@@ -2,5 +2,5 @@
 // Cole abaixo o "ID do cliente" criado no Google Cloud (termina em .apps.googleusercontent.com).
 // Deixe vazio para usar o app só neste navegador, sem planilha.
 window.MEI_CONFIG = {
-  googleClientId: ''
+  googleClientId: '865030406080-i3ecfcj0038rockrv97u6arappe657nk.apps.googleusercontent.com'
 };
