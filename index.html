@@ -57,6 +57,9 @@ header.top { position:sticky; top:env(safe-area-inset-top,0px); z-index:5; backg
 
 nav.tabs { position:fixed; left:0; right:0; bottom:0; z-index:6; background:var(--surface); border-top:1px solid var(--line); display:flex; padding:6px 8px calc(6px + env(safe-area-inset-bottom,0px)); gap:2px; }
 nav.tabs button { flex:1; background:none; border:0; padding:8px 2px; border-radius:8px; color:var(--ink2); font-size:.74rem; font-weight:600; cursor:pointer; min-width:0; }
+nav.tabs { overflow-x:auto; scrollbar-width:none; }
+nav.tabs::-webkit-scrollbar { display:none; }
+nav.tabs button { flex:1 0 auto; padding-inline:9px; white-space:nowrap; }
 nav.tabs button[aria-current="page"] { color:var(--accent); background:var(--accent-bg); }
 @media (min-width: 760px) {
   nav.tabs { position:static; border:0; background:none; max-width:980px; margin:10px auto 0; padding:0; gap:6px; }
@@ -148,6 +151,23 @@ main { max-width:980px; margin-inline:auto; padding-block:16px; display:grid; ga
 .mcell { background:var(--surface2); border:1px solid var(--line); border-radius:10px; padding:8px; display:grid; gap:4px; font-size:.78rem; }
 .mcell b { font-size:.82rem; }
 details summary { cursor:pointer; font-weight:600; }
+.dre { font-size:.8rem; }
+.dre th, .dre td { white-space:nowrap; padding:6px 7px; }
+.dre th:first-child, .dre td:first-child { position:sticky; left:0; background:var(--surface); z-index:1; min-width:150px; }
+.dre td.cur, .dre th.cur { background:var(--accent-bg); }
+.dre td.tot { font-weight:600; border-left:1px solid var(--line); }
+.dre tr.secrow td, .tbl tr.secrow td { background:var(--surface2); font-weight:700; font-size:.74rem; text-transform:uppercase; letter-spacing:.05em; color:var(--ink2); }
+.dre tr.secrow td:first-child { position:sticky; left:0; }
+.printonly { display:none; }
+@media print {
+  header.top, nav.tabs, .fab, .noprint, .sheetbg, .toast { display:none !important; }
+  .printonly { display:block !important; }
+  body { background:#fff; color:#000; padding:0; }
+  .card { border:0; box-shadow:none; padding:0; background:#fff; }
+  .scroll { overflow:visible; }
+  .dre { font-size:8pt; } .dre th, .dre td { padding:2px 3px; }
+  .dre th:first-child, .dre td:first-child { position:static; min-width:0; }
+}
 @media (prefers-reduced-motion: no-preference) { .gauge i { transition: width .4s ease; } }
 </style>
 </head>
@@ -161,6 +181,10 @@ details summary { cursor:pointer; font-weight:600; }
 <script src="config.js"></script>
 <script>
 /* ===== Cálculos (puros, regime de caixa) ===== */
+const DEF_CC = 'conta-corrente', DEF_INV = 'aplicacoes'; // contas padrão: lançamentos antigos, sem conta, caem nelas
+const TIPOS_CONTA = { corrente: 'Conta corrente', aplicacao: 'Aplicação', especie: 'Dinheiro em espécie' };
+const CATS = ['DAS MEI','Anúncios e tráfego pago','Software e assinaturas','Equipamentos','Pista, gelo e aluguel de espaço','Figurinos e material','Transporte','Internet e telefone','Contador e serviços','Tarifas bancárias','Cursos e capacitação','Outras despesas'];
+const CATS_REC = ['Contrato mensal', 'Serviço avulso', 'Mensalidades', 'Aulas particulares', 'Outras receitas'];
 const DEFAULT_CFG = {
   nome: 'Meu MEI',
   das: 86.05,            // DAS serviços 2026 (INSS 81,05 + ISS 5,00)
@@ -169,39 +193,82 @@ const DEFAULT_CFG = {
   descontaDas: true,     // abate o DAS pago do teto isento (leitura conservadora)
   pctIsento: 32,         // % do faturamento que você transfere como lucro isento
   reservaCaixa: 10,      // % do lucro tributável que fica na empresa
-  saldoCC0: 0,           // saldo da conta corrente antes do primeiro lançamento
-  saldoInv0: 0,          // saldo das aplicações antes do primeiro lançamento
   lucroInicial: 0,       // lucro já guardado na empresa antes de começar a usar o app
   retiradaAlvo: 0,       // quanto você quer receber por mês (0 = desligado)
-  caixaMin: 2000,        // colchão mínimo que fica na conta corrente
-  reservaIR: 0,                  // % estimada para separar para o IRPF do tributável
+  caixaMin: 2000,        // colchão mínimo que fica nas contas e no caixa em espécie
+  reservaIR: 0,          // % estimada para separar para o IRPF do tributável
   abertura: '',          // AAAA-MM, só preencher se abriu o MEI no ano corrente
+  contas: [
+    { id: DEF_CC, nome: 'Conta corrente', tipo: 'corrente', saldo0: 0, ativa: true },
+    { id: DEF_INV, nome: 'Aplicações', tipo: 'aplicacao', saldo0: 0, ativa: true }
+  ],
+  catsRec: CATS_REC.slice(),
+  catsDesp: CATS.slice(),
   fontes: [
     { id: 'com', nome: 'Comunicação e Marketing', cor: 'var(--com)' },
     { id: 'pat', nome: 'Aulas de Patinação', cor: 'var(--pat)' }
   ]
 };
-const CATS = ['DAS MEI','Anúncios e tráfego pago','Software e assinaturas','Equipamentos','Pista, gelo e aluguel de espaço','Figurinos e material','Transporte','Internet e telefone','Contador e serviços','Tarifas bancárias','Cursos e capacitação','Outras despesas'];
 const TIPOS = {
-  receita:   { nome: 'Receita',            cc: +1, inv: 0 },
-  despesa:   { nome: 'Despesa',            cc: -1, inv: 0 },
-  aplicacao: { nome: 'Aplicação',          cc: -1, inv: +1 },
-  resgate:   { nome: 'Resgate',            cc: +1, inv: -1 },
-  rendimento:{ nome: 'Rendimento líquido', cc: 0,  inv: +1 },
-  ret_isenta:{ nome: 'Lucro isento',       cc: -1, inv: 0 },
-  ret_trib:  { nome: 'Lucro tributável',   cc: -1, inv: 0 },
-  aporte:    { nome: 'Aporte do titular',  cc: +1, inv: 0 }
+  receita:   { nome: 'Receita' },
+  despesa:   { nome: 'Despesa' },
+  aplicacao: { nome: 'Aplicação' },
+  resgate:   { nome: 'Resgate' },
+  transf:    { nome: 'Transferência entre contas' },
+  rendimento:{ nome: 'Rendimento líquido' },
+  ret_isenta:{ nome: 'Lucro isento' },
+  ret_trib:  { nome: 'Lucro tributável' },
+  aporte:    { nome: 'Aporte do titular' }
 };
+const slug = s => String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+// Normaliza a configuração vinda do disco: migra saldos antigos para contas e garante as listas de categorias
+function mkCfg(o) {
+  o = o || {};
+  const c = { ...structuredClone(DEFAULT_CFG), ...o };
+  c.fontes = structuredClone(DEFAULT_CFG.fontes);
+  let contas = Array.isArray(o.contas) ? o.contas.filter(x => x && x.id).map(x => ({ id: String(x.id), nome: String(x.nome || x.id), tipo: TIPOS_CONTA[x.tipo] ? x.tipo : 'corrente', saldo0: Number(x.saldo0) || 0, ativa: x.ativa !== false })) : [];
+  if (!contas.some(x => x.id === DEF_CC)) contas.unshift({ id: DEF_CC, nome: 'Conta corrente', tipo: 'corrente', saldo0: Number(o.saldoCC0) || 0, ativa: true });
+  if (!contas.some(x => x.id === DEF_INV)) contas.splice(1, 0, { id: DEF_INV, nome: 'Aplicações', tipo: 'aplicacao', saldo0: Number(o.saldoInv0) || 0, ativa: true });
+  c.contas = contas;
+  const lista = (v, def) => { const a = Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean) : []; return a.length ? [...new Set(a)] : def.slice(); };
+  c.catsRec = lista(o.catsRec, CATS_REC);
+  c.catsDesp = lista(o.catsDesp, CATS).filter(x => x !== 'DAS MEI');
+  c.catsDesp.unshift('DAS MEI');
+  delete c.saldoCC0; delete c.saldoInv0;
+  return c;
+}
 const r2 = n => Math.round((n + Number.EPSILON) * 100) / 100;
 const ymOf = d => String(d).slice(0, 7);
 const yOf = d => Number(String(d).slice(0, 4));
 
 function sumTx(txs, f) { let s = 0; for (const t of txs) if (f(t)) s += Number(t.valor) || 0; return r2(s); }
 
+const contaTipo = (cfg, id) => { const c = ((cfg && cfg.contas) || []).find(x => x.id === id); return c ? c.tipo : (id === DEF_INV ? 'aplicacao' : 'corrente'); };
+const contaNomeDe = (cfg, id) => { const c = ((cfg && cfg.contas) || []).find(x => x.id === id); return c ? c.nome : (id === DEF_INV ? 'Aplicações' : id === DEF_CC ? 'Conta corrente' : id + ' (removida)'); };
+
+// Efeito de um lançamento em cada conta: lista de [idDaConta, variação]
+function efeitos(t) {
+  const v = Number(t.valor) || 0;
+  switch (t.tipo) {
+    case 'receita': case 'aporte': return [[t.conta || DEF_CC, v]];
+    case 'despesa': case 'ret_isenta': case 'ret_trib': return [[t.conta || DEF_CC, -v]];
+    case 'rendimento': return [[t.conta || DEF_INV, v]];
+    case 'aplicacao': return [[t.conta || DEF_CC, -v], [t.destino || DEF_INV, v]];
+    case 'resgate': return [[t.conta || DEF_INV, -v], [t.destino || DEF_CC, v]];
+    case 'transf': return [[t.conta || DEF_CC, -v], [t.destino || DEF_CC, v]];
+  }
+  return [];
+}
+
+// cc = dinheiro disponível (contas correntes + espécie); inv = aplicações; por = saldo de cada conta
 function balances(txs, cfg) {
-  let cc = cfg ? Number(cfg.saldoCC0) || 0 : 0, inv = cfg ? Number(cfg.saldoInv0) || 0 : 0;
-  for (const t of txs) { const k = TIPOS[t.tipo]; if (!k) continue; const v = Number(t.valor) || 0; cc += k.cc * v; inv += k.inv * v; }
-  return { cc: r2(cc), inv: r2(inv) };
+  const por = {};
+  for (const c of ((cfg && cfg.contas) || [])) por[c.id] = Number(c.saldo0) || 0;
+  for (const t of txs) for (const [id, d] of efeitos(t)) por[id] = (por[id] || 0) + d;
+  let cc = 0, inv = 0;
+  for (const id in por) { por[id] = r2(por[id]); if (contaTipo(cfg, id) === 'aplicacao') inv += por[id]; else cc += por[id]; }
+  return { cc: r2(cc), inv: r2(inv), por };
 }
 
 // Totais de um conjunto de lançamentos já filtrado por período
@@ -257,7 +324,11 @@ function apuracao(txs, ym, cfg) {
   const bal = balances(txs.filter(t => ymOf(t.data) <= ym), cfg);
   const tetoYtd = Math.max(0, r2(cfg.presuncao / 100 * ytd.receita - (cfg.descontaDas ? ytd.das : 0)));
   const folgaTeto = Math.max(0, r2(tetoYtd - antes.retIsenta));
-  const planejado = r2(cfg.pctIsento / 100 * mes.receita);
+  // Plano acumulado: pct% da receita do ano até este mês, menos o isento já transferido nos meses anteriores.
+  // Assim o que ficou de fora em meses passados (dentro do teto) volta para a sugestão.
+  const planejadoMes = r2(cfg.pctIsento / 100 * mes.receita);
+  const planejado = Math.max(0, r2(cfg.pctIsento / 100 * ytd.receita - antes.retIsenta));
+  const carry = r2(planejado - planejadoMes);
   const hist = totals(txs.filter(t => ymOf(t.data) <= ym));
   const histAntes = totals(txs.filter(t => ymOf(t.data) < ym));
   // lucro acumulado de todos os períodos que ainda está na empresa (o teto isento segue anual)
@@ -283,7 +354,7 @@ function apuracao(txs, ym, cfg) {
   const coberturaMeses = base > 0 ? r2(retido / base) : 0;
   return {
     alvo, sustentavel, retido, coberturaMeses,
-    mes, ytd, antes, bal, tetoYtd, folgaTeto, planejado, distribuivel,
+    mes, ytd, antes, bal, tetoYtd, folgaTeto, planejado, planejadoMes, carry, distribuivel,
     isento, trib, limitadoCaixa, limitadoTeto,
     faltaIsento, faltaTrib, reservaIRvalor: r2(trib * cfg.reservaIR / 100),
     retidoNaEmpresa: r2(tribBruto - tribSug0), prejuizoYtd: distribuivel <= 0
@@ -321,16 +392,66 @@ function rmrb(txs, ym) {
   return { ym, servicosComNF: t.comNF, servicosSemNF: t.semNF, total: t.receita };
 }
 
+const pad2 = n => String(n).padStart(2, '0');
+const ultimoDia = ym => new Date(Number(ym.slice(0, 4)), Number(ym.slice(5, 7)), 0).getDate();
+
+// Extrato de uma conta no período [de, ate] (datas AAAA-MM-DD), com saldo corrido
+function extratoConta(txs, cfg, id, de, ate) {
+  const ord = txs.map((t, i) => [t, i]).sort((a, b) => a[0].data.localeCompare(b[0].data) || a[1] - b[1]).map(x => x[0]);
+  const c = ((cfg && cfg.contas) || []).find(x => x.id === id);
+  let ini = c ? Number(c.saldo0) || 0 : 0, run = null, ent = 0, sai = 0; const linhas = [];
+  for (const t of ord) {
+    let d = 0; for (const [cid, v] of efeitos(t)) if (cid === id) d += v;
+    if (!d) continue;
+    if (t.data < de) { ini = r2(ini + d); continue; }
+    if (run === null) run = ini;
+    if (t.data > ate) break;
+    run = r2(run + d); if (d > 0) ent += d; else sai -= d;
+    linhas.push({ t, ent: d > 0 ? r2(d) : 0, sai: d < 0 ? r2(-d) : 0, saldo: run });
+  }
+  return { ini: r2(ini), ent: r2(ent), sai: r2(sai), fim: linhas.length ? linhas[linhas.length - 1].saldo : r2(ini), linhas };
+}
+
+// Extrato de receitas ou despesas por categoria no período, agrupado
+function extratoCat(txs, kind, cat, de, ate) {
+  const g = {};
+  for (const t of txs) {
+    if (t.tipo !== kind || t.data < de || t.data > ate) continue;
+    const k = t.cat || (kind === 'receita' ? 'Sem categoria' : 'Outras despesas');
+    if (cat && cat !== 'todas' && k !== cat) continue;
+    (g[k] = g[k] || []).push(t);
+  }
+  const grupos = Object.keys(g).map(k => { const itens = g[k].sort((a, b) => a.data.localeCompare(b.data)); return { cat: k, itens, total: sumTx(itens, () => true) }; }).sort((a, b) => b.total - a.total);
+  return { grupos, total: r2(grupos.reduce((s, x) => s + x.total, 0)) };
+}
+
+// Demonstrativo do ano, mês a mês
+function dreAno(txs, ano, cfg) {
+  const meses = [];
+  for (let m = 1; m <= 12; m++) {
+    const ym = ano + '-' + pad2(m), tx = monthTx(txs, ym);
+    const catDesp = {}, catRec = {};
+    for (const x of tx) {
+      const v = Number(x.valor) || 0;
+      if (x.tipo === 'despesa' && x.cat !== 'DAS MEI') { const k = x.cat || 'Outras despesas'; catDesp[k] = (catDesp[k] || 0) + v; }
+      else if (x.tipo === 'receita') { const k = x.cat || 'Sem categoria'; catRec[k] = (catRec[k] || 0) + v; }
+    }
+    const ate = txs.filter(x => ymOf(x.data) <= ym), bal = balances(ate, cfg), h = totals(ate);
+    meses.push({ ym, m, ...totals(tx), catDesp, catRec, disp: bal.cc, inv: bal.inv, retido: r2(h.resultado + (cfg.lucroInicial || 0) - h.retiradas) });
+  }
+  return meses;
+}
+
 const brl = n => (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const pctf = n => (n * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + '%';
 const MESES = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
 const MESES_L = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const fmtData = d => { const [y, m, dd] = String(d).split('-'); return dd + '/' + m + '/' + y.slice(2); };
 const ymLabel = ym => MESES_L[Number(ym.slice(5, 7)) - 1] + ' de ' + ym.slice(0, 4);
-if (typeof module !== 'undefined') module.exports = { DEFAULT_CFG, balances, totals, limiteMei, apuracao, serieAno, statusDas, rmrb, r2 };
+if (typeof module !== 'undefined') module.exports = { DEFAULT_CFG, mkCfg, efeitos, balances, totals, limiteMei, apuracao, serieAno, statusDas, rmrb, extratoConta, extratoCat, dreAno, r2, slug, DEF_CC, DEF_INV };
 /* ===== Estado e armazenamento ===== */
 const hojeISO = (() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); })();
-const S = { cfg: structuredClone(DEFAULT_CFG), tx: [], ano: Number(hojeISO.slice(0, 4)), ym: hojeISO.slice(0, 7), tab: 'painel', example: true, filtro: 'todos', storage: 'local' };
+const S = { cfg: mkCfg(), tx: [], ano: Number(hojeISO.slice(0, 4)), ym: hojeISO.slice(0, 7), tab: 'painel', example: true, filtro: 'todos', storage: 'local', rel: { sub: 'dre', conta: DEF_CC, per: 'mes', de: '', ate: '', kind: 'despesa', cat: 'todas', recBy: 'ativ' }, cf: null, catEdit: null, catPend: null };
 const newId = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 function exampleData(ano, mesAtual) {
@@ -342,12 +463,12 @@ function exampleData(ano, mesAtual) {
   };
   add(1, 2, { tipo: 'aporte', valor: 3000, desc: 'Saldo inicial da conta PJ' });
   for (let m = 1; m <= mesAtual; m++) {
-    add(m, 5, { tipo: 'receita', valor: 2200 + (m % 3) * 150, fonte: 'com', desc: 'Gestão de redes sociais, Cliente A', nf: true });
-    add(m, 12, { tipo: 'receita', valor: 1300 + (m % 4) * 200, fonte: 'com', desc: 'Campanha e conteúdo, Cliente B', nf: true });
-    if (m % 2 === 0) add(m, 22, { tipo: 'receita', valor: 900, fonte: 'com', desc: 'Peças gráficas avulsas, Cliente C', nf: false });
-    add(m, 8, { tipo: 'receita', valor: 1800 + (m % 3) * 100, fonte: 'pat', desc: 'Mensalidades da turma infantil', nf: false });
-    add(m, 15, { tipo: 'receita', valor: 800 + (m % 2) * 200, fonte: 'pat', desc: 'Aulas particulares', nf: false });
-    if (m === 4 || m === 8) add(m, 25, { tipo: 'receita', valor: 1200, fonte: 'pat', desc: 'Preparação para competição', nf: false });
+    add(m, 5, { tipo: 'receita', cat: 'Contrato mensal', valor: 2200 + (m % 3) * 150, fonte: 'com', desc: 'Gestão de redes sociais, Cliente A', nf: true });
+    add(m, 12, { tipo: 'receita', cat: 'Contrato mensal', valor: 1300 + (m % 4) * 200, fonte: 'com', desc: 'Campanha e conteúdo, Cliente B', nf: true });
+    if (m % 2 === 0) add(m, 22, { tipo: 'receita', cat: 'Serviço avulso', valor: 900, fonte: 'com', desc: 'Peças gráficas avulsas, Cliente C', nf: false });
+    add(m, 8, { tipo: 'receita', cat: 'Mensalidades', valor: 1800 + (m % 3) * 100, fonte: 'pat', desc: 'Mensalidades da turma infantil', nf: false });
+    add(m, 15, { tipo: 'receita', cat: 'Aulas particulares', valor: 800 + (m % 2) * 200, fonte: 'pat', desc: 'Aulas particulares', nf: false });
+    if (m === 4 || m === 8) add(m, 25, { tipo: 'receita', cat: 'Serviço avulso', valor: 1200, fonte: 'pat', desc: 'Preparação para competição', nf: false });
     add(m, 3, { tipo: 'despesa', valor: 189.9, fonte: 'ger', cat: 'Software e assinaturas', desc: 'Design, agenda e armazenamento' });
     add(m, 10, { tipo: 'despesa', valor: 420 + (m % 3) * 80, fonte: 'com', cat: 'Anúncios e tráfego pago', desc: 'Meta Ads dos clientes' });
     add(m, 7, { tipo: 'despesa', valor: 650, fonte: 'pat', cat: 'Pista, gelo e aluguel de espaço', desc: 'Aluguel de horário na pista' });
@@ -376,7 +497,7 @@ const Store = {
     try {
       const raw = localStorage.getItem('caixa-mei-v1'); if (!raw) return false;
       const d = JSON.parse(raw); if (!d || !d.started) return false;
-      S.cfg = { ...DEFAULT_CFG, ...d.cfg }; S.tx = d.tx || []; S.example = false; return true;
+      S.cfg = mkCfg(d.cfg); S.tx = d.tx || []; S.example = false; return true;
     } catch (e) { return false; }
   },
   localSave() {
@@ -398,7 +519,7 @@ const Store = {
     if (Store.mode === 'sheets') return Store.gWrite(async () => {
       const prev = S.tx, ids = new Set(list.map(x => x.id));
       S.tx = prev.filter(x => !ids.has(x.id)).concat(list);
-      try { await GS.putMany(list.filter(x => !GS.rows.has(x.id))); } catch (e) { S.tx = prev; throw e; }
+      try { await GS.updateMany(list.filter(x => GS.rows.has(x.id))); await GS.putMany(list.filter(x => !GS.rows.has(x.id))); } catch (e) { S.tx = prev; throw e; }
     });
     for (const x of list) await Store.saveTx(x);
   },
@@ -435,7 +556,7 @@ const Store = {
     Store.cfgRef = base; Store.txCol = base.collection('tx');
     base.onSnapshot(s => {
       Store.gotCfg = true; Store.cfgExists = s.exists;
-      if (s.exists) { const { exemplo, ...c } = s.data(); S.cfg = { ...DEFAULT_CFG, ...c, fontes: DEFAULT_CFG.fontes }; }
+      if (s.exists) { const { exemplo, ...c } = s.data(); S.cfg = mkCfg(c); }
       Store.decide(); onChange();
     }, () => {});
     Store.txCol.onSnapshot(q => {
@@ -452,10 +573,10 @@ const SH = 'https://sheets.googleapis.com/v4/spreadsheets';
 
 const GS = {
   cid: '', token: '', exp: 0, client: null, cb: null, libOk: false,
-  sheetId: null, gid: null, rows: new Map(), connected: false, busy: false, err: '', skipped: 0, last: 0, chain: Promise.resolve(),
+  sheetId: null, gid: null, rows: new Map(), connected: false, busy: false, err: '', skipped: 0, skippedRows: [], last: 0, chain: Promise.resolve(),
   SCOPE: 'https://www.googleapis.com/auth/drive.file',
   NAME: 'Caixa MEI - Dados',
-  HEAD: ['id', 'data', 'tipo', 'valor', 'atividade', 'categoria', 'nota_fiscal', 'competencia_das', 'descricao', 'atualizado_em'],
+  HEAD: ['id', 'data', 'tipo', 'valor', 'atividade', 'categoria', 'nota_fiscal', 'competencia_das', 'descricao', 'atualizado_em', 'conta', 'conta_destino'],
 
   loadLib() {
     return new Promise((res, rej) => {
@@ -506,23 +627,30 @@ const GS = {
     if (!id) {
       meta = await GS.api(SH, { method: 'POST', body: JSON.stringify({ properties: { title: GS.NAME, locale: 'pt_BR' }, sheets: [{ properties: { title: 'Lancamentos' } }, { properties: { title: 'Config' } }] }) });
       id = meta.spreadsheetId;
-      await GS.api(SH + '/' + id + '/values/' + encodeURIComponent('Lancamentos!A1:J1') + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [GS.HEAD] }) });
+      await GS.api(SH + '/' + id + '/values/' + encodeURIComponent('Lancamentos!A1:L1') + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [GS.HEAD] }) });
+    } else {
+      // planilhas criadas por versões antigas: acrescenta as colunas conta e conta_destino ao cabeçalho
+      const h = await GS.api(SH + '/' + id + '/values/' + encodeURIComponent('Lancamentos!A1:L1'));
+      const l1 = (h && h.values && h.values[0]) || [];
+      if (l1[10] !== 'conta' || l1[11] !== 'conta_destino') await GS.api(SH + '/' + id + '/values/' + encodeURIComponent('Lancamentos!A1:L1') + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [GS.HEAD] }) });
     }
     const aba = (meta.sheets || []).find(s => s.properties.title === 'Lancamentos');
     if (!aba) throw new Error('A planilha não tem a aba "Lancamentos".');
     GS.sheetId = id; GS.gid = aba.properties.sheetId; lsSet('caixa-mei-sheet-id', id);
   },
 
-  toRow(t) { return [t.id, t.data, t.tipo, Number(t.valor), t.fonte || '', t.cat || '', t.tipo === 'receita' ? (t.nf ? 'sim' : 'não') : '', t.comp || '', t.desc || '', new Date().toISOString()]; },
-  fromRow(r, row) {
+  toRow(t) { return [t.id, t.data, t.tipo, Number(t.valor), t.fonte || '', t.cat || '', t.tipo === 'receita' ? (t.nf ? 'sim' : 'não') : '', t.comp || '', t.desc || '', new Date().toISOString(), t.conta || '', t.destino || '']; },
+  fromRow(r, row, cfg) {
     const norm = x => String(x == null ? '' : x).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-    const ALIAS = { receita: 'receita', despesa: 'despesa', aplicacao: 'aplicacao', resgate: 'resgate', rendimento: 'rendimento', 'rendimento liquido': 'rendimento', ret_isenta: 'ret_isenta', 'lucro isento': 'ret_isenta', ret_trib: 'ret_trib', 'lucro tributavel': 'ret_trib', aporte: 'aporte', 'aporte do titular': 'aporte' };
+    const ALIAS = { transf: 'transf', transferencia: 'transf', 'transferencia entre contas': 'transf', receita: 'receita', despesa: 'despesa', aplicacao: 'aplicacao', resgate: 'resgate', rendimento: 'rendimento', 'rendimento liquido': 'rendimento', ret_isenta: 'ret_isenta', 'lucro isento': 'ret_isenta', ret_trib: 'ret_trib', 'lucro tributavel': 'ret_trib', aporte: 'aporte', 'aporte do titular': 'aporte' };
     const iso = d => {
       if (typeof d === 'number') return new Date(Math.round((d - 25569) * 86400000)).toISOString().slice(0, 10);
       const s = String(d || '').trim(), m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
       return m ? m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0') : s.slice(0, 10);
     };
     const tipo = ALIAS[norm(r[2])] || '';
+    // conta: vazio = padrão; nome ou id conhecido = essa conta; qualquer outra coisa invalida a linha (não adivinha)
+    const acc = x => { const q = slug(x); if (!q || q === 'ok' || q === 'conferir') return ''; const c = cfg.contas.find(a => a.id === q || slug(a.nome) === q); return c ? c.id : null; };
     const o = { id: r[0] ? String(r[0]) : 'linha' + row, data: iso(r[1]), tipo, valor: typeof r[3] === 'number' ? r[3] : parseNum(r[3]) };
     if (!tipo || !/^\d{4}-\d{2}-\d{2}$/.test(o.data) || !(o.valor > 0)) return null;
     const n4 = norm(r[4]);
@@ -530,39 +658,53 @@ const GS = {
     if (tipo === 'receita') { if (!fonte || fonte === 'ger') return null; o.fonte = fonte; o.nf = ['sim', 's', 'yes', 'true', '1'].includes(norm(r[6])); }
     if (tipo === 'despesa') {
       o.fonte = fonte || 'ger';
-      o.cat = CATS.find(c => norm(c) === norm(r[5])) || (r[5] ? String(r[5]) : 'Outras despesas');
-      let comp = String(r[7] || '').trim(); const mc = /^(\d{1,2})\/(\d{4})$/.exec(comp);
+      o.cat = cfg.catsDesp.find(c => norm(c) === norm(r[5])) || (r[5] ? String(r[5]).trim() : 'Outras despesas');
+      let comp = typeof r[7] === 'number' ? iso(r[7]).slice(0, 7) : String(r[7] || '').trim(); const mc = /^(\d{1,2})\/(\d{4})$/.exec(comp);
       if (mc) comp = mc[2] + '-' + mc[1].padStart(2, '0');
       if (!/^\d{4}-\d{2}/.test(comp) && o.cat === 'DAS MEI') { const d = new Date(o.data + 'T12:00:00'); d.setMonth(d.getMonth() - 1); comp = d.toISOString().slice(0, 7); }
       if (/^\d{4}-\d{2}/.test(comp)) o.comp = comp.slice(0, 7);
+    }
+    if (tipo === 'receita' && r[5]) o.cat = cfg.catsRec.find(c => norm(c) === norm(r[5])) || String(r[5]).trim();
+    const c1 = acc(r[10]), c2 = acc(r[11]);
+    if (c1 === null) return null;
+    if (c1) o.conta = c1;
+    if (tipo === 'aplicacao' || tipo === 'resgate' || tipo === 'transf') {
+      if (c2 === null) return null;
+      if (c2) o.destino = c2;
+      if (tipo === 'transf' && (!o.conta || !o.destino || o.conta === o.destino)) return null;
     }
     o.desc = String(r[8] || '');
     return o;
   },
   async loadAll() {
-    const u = SH + '/' + GS.sheetId + '/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&ranges=' + encodeURIComponent('Lancamentos!A2:J') + '&ranges=' + encodeURIComponent('Config!A1:B1');
+    const u = SH + '/' + GS.sheetId + '/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&ranges=' + encodeURIComponent('Lancamentos!A2:L') + '&ranges=' + encodeURIComponent('Config!A1:B1');
     const r = await GS.api(u);
     const vr = r.valueRanges || [], rows = (vr[0] && vr[0].values) || [], c = vr[1] && vr[1].values && vr[1].values[0];
-    GS.rows.clear(); GS.skipped = 0; const tx = [];
+    let cfg = null; try { cfg = c && c[1] ? JSON.parse(c[1]) : null; } catch (e) { cfg = null; }
+    const cfgN = mkCfg(cfg);
+    GS.rows.clear(); GS.skipped = 0; GS.skippedRows = []; const tx = [], vistos = new Set();
     rows.forEach((row, i) => {
       if (!row || row.every(v => v === '' || v == null)) return;
-      const t = GS.fromRow(row, i + 2);
-      if (t) { tx.push(t); GS.rows.set(t.id, i + 2); } else GS.skipped++;
+      const t = GS.fromRow(row, i + 2, cfgN);
+      if (t && !vistos.has(t.id)) { vistos.add(t.id); tx.push(t); GS.rows.set(t.id, i + 2); } else { GS.skipped++; GS.skippedRows.push(i + 2); }
     });
-    let cfg = null; try { cfg = c && c[1] ? JSON.parse(c[1]) : null; } catch (e) { cfg = null; }
     GS.last = Date.now();
     return { tx, cfg };
   },
   async put(t) {
     const row = GS.rows.get(t.id);
-    if (row) { await GS.api(SH + '/' + GS.sheetId + '/values/' + encodeURIComponent('Lancamentos!A' + row + ':J' + row) + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [GS.toRow(t)] }) }); return; }
+    if (row) { await GS.api(SH + '/' + GS.sheetId + '/values/' + encodeURIComponent('Lancamentos!A' + row + ':L' + row) + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [GS.toRow(t)] }) }); return; }
     await GS.putMany([t]);
   },
   async putMany(list) {
     if (!list.length) return;
-    const r = await GS.api(SH + '/' + GS.sheetId + '/values/' + encodeURIComponent('Lancamentos!A:J') + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS', { method: 'POST', body: JSON.stringify({ values: list.map(GS.toRow) }) });
+    const r = await GS.api(SH + '/' + GS.sheetId + '/values/' + encodeURIComponent('Lancamentos!A:L') + ':append?valueInputOption=RAW&insertDataOption=INSERT_ROWS', { method: 'POST', body: JSON.stringify({ values: list.map(GS.toRow) }) });
     const m = /!A(\d+):/.exec((r && r.updates && r.updates.updatedRange) || '');
     if (m) list.forEach((t, i) => GS.rows.set(t.id, Number(m[1]) + i));
+  },
+  async updateMany(list) {
+    if (!list.length) return;
+    await GS.api(SH + '/' + GS.sheetId + '/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data: list.map(t => { const row = GS.rows.get(t.id); return { range: 'Lancamentos!A' + row + ':L' + row, values: [GS.toRow(t)] }; }) }) });
   },
   async del(id) {
     const row = GS.rows.get(id); if (!row) return;
@@ -592,7 +734,7 @@ Object.assign(Store, {
   },
   gApply(d) {
     Store.gotCfg = Store.gotTx = true; Store.cfgExists = !!d.cfg; Store.txCount = d.tx.length;
-    if (d.cfg) S.cfg = { ...DEFAULT_CFG, ...d.cfg, fontes: DEFAULT_CFG.fontes };
+    if (d.cfg) S.cfg = mkCfg(d.cfg);
     S.tx = d.tx; Store.decide();
   },
   async gRefresh() {
@@ -625,7 +767,7 @@ function renderHeader() {
 }
 
 function renderNav() {
-  const tabs = [['painel', 'Painel'], ['lanc', 'Lançamentos'], ['apur', 'Apuração'], ['obrig', 'Obrigações'], ['ajustes', 'Ajustes']];
+  const tabs = [['painel', 'Painel'], ['lanc', 'Lançamentos'], ['apur', 'Apuração'], ['rel', 'Relatórios'], ['contas', 'Contas'], ['obrig', 'Obrigações'], ['ajustes', 'Ajustes']];
   $('#nav').innerHTML = tabs.map(([k, n]) => `<button data-act="tab" data-v="${k}" ${S.tab === k ? 'aria-current="page"' : ''}>${n}</button>`).join('');
 }
 
@@ -663,6 +805,13 @@ function alertas(ap, lim, das) {
   return `<div class="alerts">${a.map(([c, t]) => `<div class="alert ${c}">${esc(t)}</div>`).join('')}</div>`;
 }
 
+// Saldo de cada conta (só aparece quando há mais de duas contas ou alguma conta extra com saldo)
+function contasLinhas(bal) {
+  const vis = S.cfg.contas.filter(c => c.ativa || bal.por[c.id]);
+  if (S.cfg.contas.length <= 2) return '';
+  return `<div class="steps" style="margin-top:12px">${vis.map(c => step(`${esc(c.nome)} <span class="pill" style="margin-left:4px">${esc(TIPOS_CONTA[c.tipo])}</span>`, brl(bal.por[c.id] || 0), (bal.por[c.id] || 0) < 0 ? 'neg' : '')).join('')}</div>`;
+}
+
 function viewPainel() {
   const ap = apuracao(S.tx, S.ym, S.cfg);
   const lim = limiteMei(S.tx, S.ano, S.cfg, hojeISO);
@@ -680,11 +829,11 @@ function viewPainel() {
   ${S.example ? `<div class="banner"><span><b>Dados de exemplo.</b> Veja como o app funciona e depois comece o seu caixa do zero.</span><button class="btn sm" data-act="start">Começar com meus dados</button></div>` : ''}
   ${alertas(ap, lim, das)}
   <div class="grid2">
-    <div class="card hi"><div class="kpi hero"><span class="eyebrow">Conta corrente</span><span class="v ${ap.bal.cc < 0 ? 'neg' : ''}">${brl(ap.bal.cc)}</span><span class="s">posição ao fim de ${esc(ymLabel(S.ym))}</span></div>
+    <div class="card hi"><div class="kpi hero"><span class="eyebrow">Disponível (contas e espécie)</span><span class="v ${ap.bal.cc < 0 ? 'neg' : ''}">${brl(ap.bal.cc)}</span><span class="s">posição ao fim de ${esc(ymLabel(S.ym))}</span></div>
       <div class="grid3" style="margin-top:14px;grid-template-columns:1fr 1fr">
         <div class="kpi"><span class="eyebrow">Aplicações</span><span class="v">${brl(ap.bal.inv)}</span></div>
         <div class="kpi"><span class="eyebrow">Resultado do mês</span><span class="v ${m.resultado < 0 ? 'neg' : 'pos'}">${brl(m.resultado)}</span></div>
-      </div></div>
+      </div>${contasLinhas(ap.bal)}</div>
     <div class="card"><h3>Limite do MEI em ${S.ano}</h3>
       <div class="gauge" role="img" aria-label="${pctf(lim.pct)} do limite usado"><i class="${cls}" style="width:${(pctBar * 100).toFixed(1)}%"></i><u style="left:${(100 / 1.2).toFixed(2)}%"></u></div>
       <div class="step" style="border:0"><span>Faturado</span><span class="n">${brl(lim.receita)}</span></div>
@@ -705,23 +854,28 @@ function viewPainel() {
   </div>`;
 }
 /* ===== Telas: lançamentos e apuração ===== */
-const FILTROS = [['todos', 'Todos'], ['receita', 'Receitas'], ['despesa', 'Despesas'], ['invest', 'Aplicações'], ['ret', 'Transferências']];
-const grupoDe = t => t === 'receita' ? 'receita' : t === 'despesa' ? 'despesa' : (t === 'aplicacao' || t === 'resgate' || t === 'rendimento') ? 'invest' : (t === 'ret_isenta' || t === 'ret_trib') ? 'ret' : 'outros';
+const FILTROS = [['todos', 'Todos'], ['receita', 'Receitas'], ['despesa', 'Despesas'], ['invest', 'Entre contas'], ['ret', 'Para você']];
+const grupoDe = t => t === 'receita' ? 'receita' : t === 'despesa' ? 'despesa' : (t === 'aplicacao' || t === 'resgate' || t === 'rendimento' || t === 'transf') ? 'invest' : (t === 'ret_isenta' || t === 'ret_trib') ? 'ret' : 'outros';
 let delPend = null;
 
+const MOVE = ['aplicacao', 'resgate', 'transf'];
 function txRow(t) {
   const k = TIPOS[t.tipo];
   const v = Number(t.valor) || 0;
-  const flow = k.cc !== 0 ? k.cc * v : v;
-  const cor = t.tipo === 'receita' || t.tipo === 'rendimento' ? 'pos' : (t.tipo === 'despesa' || t.tipo === 'ret_isenta' || t.tipo === 'ret_trib') ? 'neg' : '';
+  const mov = MOVE.includes(t.tipo);
+  const cor = t.tipo === 'receita' || t.tipo === 'rendimento' || t.tipo === 'aporte' ? 'pos' : (t.tipo === 'despesa' || t.tipo === 'ret_isenta' || t.tipo === 'ret_trib') ? 'neg' : '';
+  const sinalTx = mov ? '⇄ ' : (cor === 'neg' ? '−' : '+');
   const pills = [];
   if (t.tipo === 'receita' || t.tipo === 'despesa') pills.push(`<span class="pill"><i class="dot" style="background:${fonteCor(t.fonte)};margin-right:4px"></i>${esc(fonteNome(t.fonte))}</span>`);
   if (t.tipo === 'despesa') pills.push(`<span class="pill">${esc(t.cat || 'Outras despesas')}</span>`);
+  if (t.tipo === 'receita' && t.cat) pills.push(`<span class="pill">${esc(t.cat)}</span>`);
   if (t.cat === 'DAS MEI' && t.comp) pills.push(`<span class="pill info">competência ${esc(t.comp.slice(5))}/${esc(t.comp.slice(0, 4))}</span>`);
   if (t.tipo === 'receita') pills.push(t.nf ? '<span class="pill ok">com nota</span>' : '<span class="pill warn">sem nota</span>');
   if (t.tipo !== 'receita' && t.tipo !== 'despesa') pills.push(`<span class="pill info">${esc(k.nome)}</span>`);
+  if (mov) { const [[o], [d]] = efeitos(t); pills.push(`<span class="pill">${esc(contaNomeDe(S.cfg, o))} → ${esc(contaNomeDe(S.cfg, d))}</span>`); }
+  else if (S.cfg.contas.length > 2) { const [[o]] = efeitos(t); pills.push(`<span class="pill">${esc(contaNomeDe(S.cfg, o))}</span>`); }
   const conf = delPend === t.id;
-  return `<div class="tx"><span class="d">${fmtData(t.data)}</span><span class="t"><b>${esc(t.desc || k.nome)}</b></span><span class="a ${cor}">${k.cc === 0 ? '+' : (flow < 0 ? '−' : '+')}${brl(Math.abs(v))}</span>
+  return `<div class="tx"><span class="d">${fmtData(t.data)}</span><span class="t"><b>${esc(t.desc || k.nome)}</b></span><span class="a ${cor}">${sinalTx}${brl(Math.abs(v))}</span>
     <div class="x">${pills.join('')}<span style="flex:1"></span>
       <button class="link" data-act="edit" data-id="${esc(t.id)}">Editar</button>
       <button class="link danger" data-act="${conf ? 'delok' : 'del'}" data-id="${esc(t.id)}">${conf ? 'Confirmar exclusão' : 'Excluir'}</button></div></div>`;
@@ -734,7 +888,6 @@ function viewLanc() {
   const limMes = S.ano === Number(hojeISO.slice(0, 4)) ? Number(hojeISO.slice(5, 7)) : 12;
   const saldos = [];
   for (let m = 1; m <= limMes; m++) { const ym = S.ano + '-' + String(m).padStart(2, '0'); const b = balances(S.tx.filter(t => t.data <= ym + '-31'), S.cfg); saldos.push(`<tr><td>${MESES_L[m - 1]}</td><td class="r">${brl(b.cc)}</td><td class="r">${brl(b.inv)}</td></tr>`); }
-  const dtConf = S.ym < hojeISO.slice(0, 7) ? S.ym + '-28' : hojeISO;
   return `
   <div class="card"><div class="grid3">
     <div class="kpi"><span class="eyebrow">Receitas</span><span class="v pos">${brl(tt.receita)}</span></div>
@@ -742,16 +895,9 @@ function viewLanc() {
     <div class="kpi"><span class="eyebrow">Resultado</span><span class="v ${tt.resultado < 0 ? 'neg' : ''}">${brl(tt.resultado)}</span></div>
     <div class="kpi"><span class="eyebrow">Transferido</span><span class="v">${brl(tt.retiradas)}</span></div>
   </div></div>
-  <div class="card"><h3>Conferir com o extrato</h3>
-    <p class="small muted" style="margin-bottom:10px">Digite os saldos do extrato da conta e das aplicações na mesma data. Use o saldo líquido da aplicação, depois do imposto.</p>
-    <div style="display:grid;gap:10px">
-      <div class="frow"><div class="field"><label for="cf_data">Data do extrato</label><input id="cf_data" type="date" value="${dtConf}"></div><div class="field"><label for="cf_cc">Saldo da conta (R$)</label><input id="cf_cc" inputmode="decimal" placeholder="0,00"></div></div>
-      <div class="field"><label for="cf_inv">Saldo das aplicações (R$)</label><input id="cf_inv" inputmode="decimal" placeholder="0,00"></div>
-      <div><button class="btn sm" data-act="conferir">Conferir</button></div>
-    </div>
-    <div id="cfRes"></div>
-    <details style="margin-top:12px"><summary>Saldos no fim de cada mês, segundo o app</summary>
-      <div class="scroll"><table class="tbl" style="margin-top:8px"><thead><tr><th>Mês</th><th class="r">Conta</th><th class="r">Aplicações</th></tr></thead><tbody>${saldos.join('')}</tbody></table></div></details></div>
+  <div class="card flat"><p class="small">Para conferir os saldos com o extrato do banco e lançar o rendimento das aplicações, use a aba <button class="link" data-act="tab" data-v="contas">Contas</button>. Saldos no fim de cada mês, segundo o app:</p>
+    <details style="margin-top:8px"><summary>Ver saldos mês a mês</summary>
+      <div class="scroll"><table class="tbl" style="margin-top:8px"><thead><tr><th>Mês</th><th class="r">Disponível</th><th class="r">Aplicações</th></tr></thead><tbody>${saldos.join('')}</tbody></table></div></details></div>
   <div class="card"><div class="seg" role="radiogroup" aria-label="Filtrar lançamentos" style="margin-bottom:6px">${FILTROS.map(([k, n]) => `<label><input type="radio" name="flt" value="${k}" data-act="filtro" ${S.filtro === k ? 'checked' : ''}><span>${n}</span></label>`).join('')}</div>
     <div class="list">${lista.length ? lista.map(txRow).join('') : `<p class="muted" style="padding:18px 0">Nenhum lançamento em ${esc(ymLabel(S.ym))}${S.filtro !== 'todos' ? ' neste filtro' : ''}. Toque em <b>+ Lançar</b> para registrar.</p>`}</div></div>`;
 }
@@ -767,8 +913,8 @@ function viewApur() {
   const geral = sumTx(monthTx(S.tx, S.ym), t => t.tipo === 'despesa' && t.fonte === 'ger' && t.cat !== 'DAS MEI');
   const falta = r2(ap.faltaIsento + ap.faltaTrib);
   const aviso = [];
-  if (ap.limitadoTeto) aviso.push(`Seu plano de ${c.pctIsento}% do faturamento passaria do teto isento do ano. A sugestão foi limitada ao que ainda cabe.`);
-  if (ap.limitadoCaixa) aviso.push(`Valor limitado para manter ${brl(c.caixaMin || 0)} de caixa mínimo na conta corrente.`);
+  if (ap.limitadoTeto) aviso.push(`O plano de isento (${brl(ap.planejado)}) passaria do teto do ano. A sugestão foi limitada ao que ainda cabe.`);
+  if (ap.limitadoCaixa) aviso.push(`Valor limitado para manter ${brl(c.caixaMin || 0)} de caixa mínimo nas contas e no dinheiro em espécie.`);
   if (ap.prejuizoYtd) aviso.push('Sem lucro acumulado disponível: nada a transferir.');
   return `
   <div class="card hi"><h2>Resultado de ${esc(ymLabel(S.ym))}</h2>
@@ -782,14 +928,16 @@ function viewApur() {
       ${step('Resultado do mês', brl(m.resultado), m.resultado < 0 ? 'neg' : 'pos', 'total')}
     </div></div>
   <div class="card hi"><h2>Quanto transferir para a conta pessoal</h2>
-    <p class="small muted" style="margin-bottom:6px">Considera o lucro acumulado do ano, o que você já transferiu e o saldo do caixa.</p>
+    <p class="small muted" style="margin-bottom:6px">Considera o lucro acumulado, o isento que sobrou de meses anteriores, o que você já transferiu e o dinheiro disponível.</p>
     <div class="steps">
       ${step('Lucro acumulado ainda na empresa', brl(ap.distribuivel))}
-      ${step(`Plano: ${c.pctIsento}% do faturamento do mês`, brl(ap.planejado))}
+      ${step(`Plano: ${c.pctIsento}% do faturamento do mês`, brl(ap.planejadoMes))}
+      ${ap.carry !== 0 ? step(ap.carry > 0 ? '(+) Isento de meses anteriores ainda não transferido' : '(−) Isento já adiantado em meses anteriores', sinal(ap.carry), ap.carry > 0 ? 'pos' : 'neg') : ''}
+      ${ap.carry !== 0 ? step('Plano de isento deste mês', brl(ap.planejado), '', 'total') : ''}
       ${step(`Teto isento restante (${c.presuncao}% da receita do ano${c.descontaDas ? ', menos DAS' : ''}, menos o já transferido)`, brl(ap.folgaTeto))}
       ${step('Lucro isento sugerido', brl(ap.isento), 'pos', 'total')}
       ${step(ap.alvo > 0 ? `Lucro tributável sugerido (completa sua retirada de ${brl(ap.alvo)})` : `Lucro tributável sugerido (fica ${c.reservaCaixa}% na empresa)`, brl(ap.trib), '', 'total')}
-      ${step('Caixa mínimo que fica na conta', brl(c.caixaMin || 0))}
+      ${step('Caixa mínimo que fica (contas e espécie)', brl(c.caixaMin || 0))}
       ${step('Lucro que continua na empresa', brl(ap.retido))}
       ${step('Já transferido neste mês', brl(m.retiradas))}
       ${step('Falta transferir', brl(falta), falta > 0 ? 'warnc' : 'pos', 'total')}
@@ -810,6 +958,7 @@ function viewApur() {
   <div class="card flat"><details><summary>Como funciona e onde está o risco</summary>
     <div style="display:grid;gap:8px;margin-top:10px" class="small">
       <p><b>Isento tem teto.</b> Sem contabilidade formal, só é isento o lucro presumido de ${c.presuncao}% da receita de serviços${c.descontaDas ? ', menos o DAS pago' : ''}. O que passar disso é rendimento tributável na sua pessoa física. Com contador e escrituração regular, o lucro real apurado pode ser distribuído isento, o que muda o jogo se sua margem for maior que ${c.presuncao}%.</p>
+      <p><b>O isento que ficou para trás volta.</b> Se em algum mês você transferiu menos que ${c.pctIsento}% do faturamento, a diferença entra na sugestão dos meses seguintes, sempre dentro do teto do ano. Em dezembro o teto zera para o ano seguinte, então o que não foi transferido até lá deixa de poder ser isento.</p>
       <p><b>Lucro é o que sobrou, não uma porcentagem fixa.</b> Transferir ${c.pctIsento}% do faturamento em mês fraco é tirar capital da empresa. Por isso a sugestão nunca passa do lucro acumulado nem do saldo da conta.</p>
       <p><b>Rendimento de aplicação não é faturamento.</b> Ele entra no resultado, mas fica fora do limite de ${brl(c.limite)} e da base do lucro presumido.</p>
       <p><b>Lucro guardado de anos anteriores</b> entra na conta e pode ser transferido. O teto do isento, porém, é calculado ano a ano. Se você já tinha lucro guardado antes de usar o app, informe em Ajustes.</p>
@@ -865,14 +1014,23 @@ function viewObrig() {
 
 const fld = (id, label, val, attrs) => `<div class="field"><label for="${id}">${label}</label><input id="${id}" value="${esc(val)}" ${attrs || ''}></div>`;
 
+function catBloco(kind, titulo, lista) {
+  const uso = n => S.tx.filter(t => t.tipo === kind && (t.cat || (kind === 'receita' ? 'Sem categoria' : 'Outras despesas')) === n).length;
+  const linhas = lista.map(n => {
+    const fixa = n === 'DAS MEI', key = kind + '|' + n, ed = S.catEdit && S.catEdit.key === key, conf = S.catPend === key, u = uso(n);
+    if (ed) return `<div class="step" style="align-items:center;gap:8px"><input id="cat_novo" value="${esc(n)}" style="flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line);border-radius:8px;padding:7px"><span><button class="link" data-act="catRenOk" data-kind="${kind}" data-nome="${esc(n)}">Salvar</button><button class="link" data-act="catRenCancel">Cancelar</button></span></div>`;
+    return `<div class="step" style="align-items:center"><span>${esc(n)}${fixa ? ' <span class="pill">fixa</span>' : ''}${u ? ` <span class="small muted">${u} lanç.</span>` : ''}</span><span>${fixa ? '' : `<button class="link" data-act="catRen" data-kind="${kind}" data-nome="${esc(n)}">Renomear</button><button class="link danger" data-act="${conf ? 'catDelOk' : 'catDel'}" data-kind="${kind}" data-nome="${esc(n)}">${conf ? 'Confirmar' : 'Remover'}</button>`}</span></div>`;
+  }).join('');
+  return `<h3 style="margin-top:6px">${titulo}</h3><div class="steps" style="margin-bottom:8px">${linhas}</div>
+    <div style="display:flex;gap:8px;margin-bottom:14px"><input id="catadd_${kind}" placeholder="Nova categoria de ${titulo.toLowerCase()}" style="flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line);border-radius:9px;padding:10px"><button class="btn sm" data-act="catAdd" data-kind="${kind}">Adicionar</button></div>`;
+}
+
 function viewAjustes() {
   const c = S.cfg;
   return `
   <div class="card"><h2>Seu MEI</h2><div style="display:grid;gap:12px;margin-top:10px">
     ${fld('c_nome', 'Nome do negócio', c.nome)}
     <div class="frow">${fld('c_das', 'DAS mensal (R$)', String(c.das).replace('.', ','), 'inputmode="decimal"')}${fld('c_limite', 'Limite anual (R$)', String(c.limite), 'inputmode="decimal"')}</div>
-    <div class="frow">${fld('c_cc0', 'Saldo inicial da conta (R$)', String(c.saldoCC0 || 0).replace('.', ','), 'inputmode="decimal"')}${fld('c_inv0', 'Saldo inicial das aplicações (R$)', String(c.saldoInv0 || 0).replace('.', ','), 'inputmode="decimal"')}</div>
-    <p class="small muted">Use o saldo do extrato na véspera do primeiro lançamento. Se você lança o ano todo, é o saldo de 31/12 do ano anterior.</p>
     ${fld('c_abertura', 'Mês de abertura do MEI', c.abertura, 'type="month"')}
   </div></div>
   <div class="card"><h2>Regras de transferência</h2><div style="display:grid;gap:12px;margin-top:10px">
@@ -880,11 +1038,14 @@ function viewAjustes() {
     <div class="frow">${fld('c_rcx', '% do tributável que fica na empresa', c.reservaCaixa, 'inputmode="decimal"')}${fld('c_rir', '% do tributável para o IRPF', c.reservaIR, 'inputmode="decimal"')}</div>
     ${fld('c_lucro', 'Lucro já guardado na empresa antes do app (R$)', String(c.lucroInicial || 0).replace('.', ','), 'inputmode="decimal"')}
     ${fld('c_alvo', 'Quanto você quer receber por mês (R$, 0 desliga)', String(c.retiradaAlvo || 0).replace('.', ','), 'inputmode="decimal"')}
-    ${fld('c_cmin', 'Caixa mínimo na conta corrente (R$)', String(c.caixaMin).replace('.', ','), 'inputmode="decimal"')}
+    ${fld('c_cmin', 'Caixa mínimo nas contas e em espécie (R$)', String(c.caixaMin).replace('.', ','), 'inputmode="decimal"')}
     <label class="check"><input type="checkbox" id="c_das_abate" ${c.descontaDas ? 'checked' : ''}> Abater o DAS pago do teto isento (leitura mais segura)</label>
     <p class="small muted">Dica: um percentual de isento abaixo do teto de ${c.presuncao}% deixa folga para meses em que o DAS ou o faturamento mudam.</p>
     <div><button class="btn" data-act="saveCfg">Salvar ajustes</button></div>
   </div></div>
+  <div class="card"><h2>Categorias</h2>
+    <p class="small muted" style="margin-bottom:10px">Monte as listas do seu jeito. Remover uma categoria só tira da lista de escolha: os lançamentos antigos continuam com o nome que tinham. Renomear atualiza todos os lançamentos dela.</p>
+    ${catBloco('receita', 'Receitas', c.catsRec)}${catBloco('despesa', 'Despesas', c.catsDesp)}</div>
   <div class="card"><h2>Seus dados</h2>
     <p class="small muted" style="margin-bottom:10px">${S.storage === 'db' ? 'Seus lançamentos ficam salvos na sua conta, visíveis só para você.' : S.storage === 'sheets' ? 'Seus lançamentos ficam na planilha Google do seu Drive. Você pode abri-la, filtrar e compartilhar com o contador.' : 'Os lançamentos ficam só neste navegador. Baixe um backup de vez em quando.'}</p>
     ${Store.mode === 'sheets' && GS.connected ? sheetsBox() : ''}
@@ -892,20 +1053,216 @@ function viewAjustes() {
     <label class="btn sm alt" style="display:inline-flex;align-items:center;cursor:pointer" for="impFile">Importar backup</label><input id="impFile" type="file" accept=".json,application/json" hidden></div></div>`;
 }
 
-const sheetsBox = () => `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><a class="btn sm" style="text-decoration:none;display:inline-flex;align-items:center" href="https://docs.google.com/spreadsheets/d/${esc(GS.sheetId)}" target="_blank" rel="noopener">Abrir planilha</a><button class="btn sm alt" data-act="grefresh">Atualizar da planilha</button><button class="btn sm alt" data-act="gdisc">Desconectar neste aparelho</button></div>${GS.skipped ? `<div class="alert warn" style="margin-bottom:10px">${GS.skipped} linha(s) da planilha foram ignoradas por formato inválido (tipo, data ou valor). Elas continuam lá, mas não entram nos cálculos.</div>` : ''}`;
+const sheetsBox = () => `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><a class="btn sm" style="text-decoration:none;display:inline-flex;align-items:center" href="https://docs.google.com/spreadsheets/d/${esc(GS.sheetId)}" target="_blank" rel="noopener">Abrir planilha</a><button class="btn sm alt" data-act="grefresh">Atualizar da planilha</button><button class="btn sm alt" data-act="gdisc">Desconectar neste aparelho</button></div>${GS.skipped ? `<div class="alert warn" style="margin-bottom:10px">${GS.skipped} linha(s) da planilha foram ignoradas: <b>${GS.skippedRows.slice(0, 40).join(', ')}${GS.skippedRows.length > 40 ? '...' : ''}</b>. Motivos comuns: tipo fora da lista, data ou valor inválidos, receita sem atividade (com ou pat), conta desconhecida ou id repetido. Elas continuam na planilha, mas não entram nos cálculos.</div>` : ''}`;
 const viewConectar = () => `<div class="card hi" style="max-width:520px;margin-inline:auto"><h2>Conectar ao Google Sheets</h2><p style="margin:8px 0 12px">Seus lançamentos ficam numa planilha do seu Google Drive chamada <b>${esc(GS.NAME)}</b>. Na primeira vez, o app cria a planilha e o Google pede sua permissão. O app só enxerga a planilha que ele mesmo criou.</p>${GS.err ? `<div class="alert bad" style="margin-bottom:12px">${esc(GS.err)}</div>` : ''}<button class="btn" data-act="gconnect" ${GS.busy || !GS.libOk ? 'disabled' : ''}>${GS.busy ? 'Conectando...' : 'Conectar ao Google'}</button><p class="small muted" style="margin-top:10px">Ao abrir o app, pode ser preciso tocar em Conectar de novo. É um clique, o Google lembra a permissão.</p></div>`;
+/* ===== Telas: contas e relatórios (demonstrativo anual, extratos) ===== */
+const numBr = n => (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const csvNum = n => (Number(n) || 0).toFixed(2).replace('.', ',');
+const csvTxt = s => '"' + String(s == null ? '' : s).replace(/"/g, '""') + '"';
+const contaNome = id => contaNomeDe(S.cfg, id);
+const contaUsada = id => S.tx.some(t => t.conta === id || t.destino === id);
+
+/* ---------- Contas ---------- */
+function dataConf() { return S.ym < hojeISO.slice(0, 7) ? S.ym + '-' + pad2(ultimoDia(S.ym)) : hojeISO; }
+
+function viewContas() {
+  const fimMes = S.ym + '-' + pad2(ultimoDia(S.ym));
+  const bal = balances(S.tx.filter(t => t.data <= fimMes), S.cfg);
+  const vis = S.cfg.contas.filter(c => c.ativa || bal.por[c.id]);
+  const ativas = S.cfg.contas.filter(c => c.ativa);
+  const saldos = vis.map(c => step(`${esc(c.nome)} <span class="pill" style="margin-left:4px">${esc(TIPOS_CONTA[c.tipo])}</span>${c.ativa ? '' : ' <span class="pill warn">arquivada</span>'}`, brl(bal.por[c.id] || 0), (bal.por[c.id] || 0) < 0 ? 'neg' : '')).join('');
+  const gerir = S.cfg.contas.map(c => {
+    const arq = !c.ativa, remov = c.id !== DEF_CC && c.id !== DEF_INV && !contaUsada(c.id);
+    return `<div class="card flat" style="margin-bottom:8px">
+      <div class="frow"><div class="field"><label for="ct_n_${esc(c.id)}">Nome</label><input id="ct_n_${esc(c.id)}" value="${esc(c.nome)}"></div>
+        <div class="field"><label for="ct_s_${esc(c.id)}">Saldo inicial (R$)</label><input id="ct_s_${esc(c.id)}" inputmode="decimal" value="${String(c.saldo0 || 0).replace('.', ',')}"></div></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap"><span class="pill">${esc(TIPOS_CONTA[c.tipo])}</span>${arq ? '<span class="pill warn">arquivada</span>' : ''}<span style="flex:1"></span>
+        <button class="link" data-act="ctArq" data-id="${esc(c.id)}">${arq ? 'Reativar' : 'Arquivar'}</button>${remov ? `<button class="link danger" data-act="ctDel" data-id="${esc(c.id)}">Remover</button>` : ''}</div></div>`;
+  }).join('');
+  return `
+  <div class="card hi"><h2>Contas em ${esc(ymLabel(S.ym))}</h2>
+    <p class="small muted" style="margin-bottom:8px">Posição no fim do mês escolhido lá em cima. Disponível é o que está em conta corrente e em espécie. Aplicações ficam à parte.</p>
+    <div class="steps">${saldos}
+      ${step('Disponível (contas e espécie)', brl(bal.cc), '', 'total')}
+      ${step('Aplicações', brl(bal.inv))}
+      ${step('Total da empresa', brl(r2(bal.cc + bal.inv)), '', 'total')}</div></div>
+  <div class="card"><h2>Conferir com o extrato e lançar rendimento</h2>
+    <p class="small muted" style="margin-bottom:10px">Digite o saldo que o banco mostra em cada conta na data escolhida. Nas aplicações, use o saldo líquido, depois do imposto. Se o saldo do banco for maior que o do app, a diferença é o rendimento do período e você pode lançar com um toque.</p>
+    <div style="display:grid;gap:10px">
+      <div class="field"><label for="cf_data">Data do extrato</label><input id="cf_data" type="date" value="${dataConf()}"></div>
+      ${ativas.map(c => `<div class="field"><label for="cfc_${esc(c.id)}">${esc(c.nome)}${c.tipo === 'aplicacao' ? ' (saldo líquido)' : ''}</label><input id="cfc_${esc(c.id)}" inputmode="decimal" placeholder="saldo no extrato, 0,00"></div>`).join('')}
+      <div><button class="btn sm" data-act="conferir">Conferir</button></div>
+    </div>
+    <div id="cfRes"></div></div>
+  <div class="card"><h2>Gerenciar contas</h2>
+    <p class="small muted" style="margin-bottom:10px">Cadastre cada conta corrente, aplicação ou o dinheiro em espécie. O saldo inicial é o que a conta tinha antes do primeiro lançamento do app. Se a conta passou a existir depois, deixe zero e registre um aporte ou uma transferência entre contas na data certa, senão os meses anteriores ficam com saldo errado.</p>
+    ${gerir}
+    <div><button class="btn sm" data-act="ctSave">Salvar nomes e saldos</button></div>
+    <h3 style="margin:16px 0 8px">Nova conta</h3>
+    <div style="display:grid;gap:10px">
+      <div class="frow"><div class="field"><label for="ct_new_n">Nome</label><input id="ct_new_n" placeholder="Ex.: Caixa em espécie, CDB do banco X"></div>
+        <div class="field"><label for="ct_new_t">Tipo</label><select id="ct_new_t">${Object.keys(TIPOS_CONTA).map(k => `<option value="${k}">${TIPOS_CONTA[k]}</option>`).join('')}</select></div></div>
+      <div class="field"><label for="ct_new_s">Saldo inicial (R$)</label><input id="ct_new_s" inputmode="decimal" value="0"></div>
+      <div><button class="btn sm alt" data-act="ctAdd">Adicionar conta</button></div></div></div>`;
+}
+
+/* ---------- Relatórios ---------- */
+const PERS = [['mes', 'Mês escolhido'], ['ano', 'Ano escolhido'], ['tudo', 'Desde o início'], ['custom', 'Personalizado']];
+function periodo() {
+  const r = S.rel;
+  if (r.per === 'ano') return { de: S.ano + '-01-01', ate: S.ano + '-12-31', label: 'Ano de ' + S.ano };
+  if (r.per === 'tudo') return { de: '0000-01-01', ate: '9999-12-31', label: 'Desde o início' };
+  if (r.per === 'custom') { const de = r.de || S.ym + '-01', ate = r.ate || S.ym + '-' + pad2(ultimoDia(S.ym)); return { de, ate, label: fmtData(de) + ' a ' + fmtData(ate) }; }
+  return { de: S.ym + '-01', ate: S.ym + '-' + pad2(ultimoDia(S.ym)), label: ymLabel(S.ym) };
+}
+const segRel = (name, opts, cur, field) => `<div class="seg" role="radiogroup">${opts.map(([k, n]) => `<label><input type="radio" name="${name}" value="${k}" data-rel="${field}" ${cur === k ? 'checked' : ''}><span>${n}</span></label>`).join('')}</div>`;
+const perCtl = () => `<div class="field"><label for="rel_per">Período</label><select id="rel_per" data-rel="per">${PERS.map(([k, n]) => `<option value="${k}" ${S.rel.per === k ? 'selected' : ''}>${n}</option>`).join('')}</select></div>
+  ${S.rel.per === 'custom' ? `<div class="frow"><div class="field"><label for="rel_de">De</label><input id="rel_de" type="date" data-rel="de" value="${esc(periodo().de)}"></div><div class="field"><label for="rel_ate">Até</label><input id="rel_ate" type="date" data-rel="ate" value="${esc(periodo().ate)}"></div></div>` : ''}`;
+const acoesRel = () => `<div class="noprint" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><button class="btn sm" data-act="relCsv">Baixar planilha (CSV)</button><button class="btn sm alt" data-act="relPrint">Imprimir ou salvar em PDF</button></div>`;
+const cabImpr = titulo => `<div class="printonly" style="margin-bottom:10px"><h2>${esc(S.cfg.nome)}</h2><p>${esc(titulo)}</p></div>`;
+
+function viewRel() {
+  const sub = S.rel.sub;
+  return `<div class="card noprint"><div class="seg" role="radiogroup" aria-label="Tipo de relatório">${[['dre', 'Resultado do ano'], ['conta', 'Extrato de conta'], ['cat', 'Receitas e despesas']].map(([k, n]) => `<label><input type="radio" name="relsub" value="${k}" data-rel="sub" ${sub === k ? 'checked' : ''}><span>${n}</span></label>`).join('')}</div></div>`
+    + (sub === 'conta' ? viewExtConta() : sub === 'cat' ? viewExtCat() : viewDre());
+}
+
+/* Demonstrativo anual: uma coluna por mês */
+function dreRows() {
+  const meses = dreAno(S.tx, S.ano, S.cfg), hojeAno = Number(hojeISO.slice(0, 4));
+  const idxFim = S.ano < hojeAno ? 11 : S.ano === hojeAno ? Number(hojeISO.slice(5, 7)) - 1 : -1;
+  const soma = a => r2(a.reduce((x, y) => x + y, 0));
+  const rows = [];
+  const sec = t => rows.push({ sec: t });
+  const add = (label, vals, o) => rows.push({ label, vals, total: soma(vals), ...(o || {}) });
+  const pos = (label, vals, o) => rows.push({ label, vals: vals.map((v, i) => i > idxFim ? null : v), total: idxFim >= 0 ? vals[idxFim] : null, ...(o || {}) });
+  const ordem = (usadas, lista) => [...lista.filter(k => usadas.has(k)), ...[...usadas].filter(k => !lista.includes(k))];
+  sec('Receitas');
+  if (S.rel.recBy === 'cat') {
+    const us = new Set(); meses.forEach(m => Object.keys(m.catRec).forEach(k => us.add(k)));
+    ordem(us, S.cfg.catsRec).forEach(k => add(k, meses.map(m => m.catRec[k] || 0), { ind: true }));
+  } else S.cfg.fontes.forEach(f => add(f.nome, meses.map(m => m.porFonte[f.id] || 0), { ind: true, cor: f.cor }));
+  add('Receitas totais', meses.map(m => m.receita), { bold: true });
+  sec('Despesas');
+  const ud = new Set(); meses.forEach(m => Object.keys(m.catDesp).forEach(k => ud.add(k)));
+  ordem(ud, S.cfg.catsDesp).forEach(k => add(k, meses.map(m => m.catDesp[k] || 0), { ind: true }));
+  add('Despesas operacionais', meses.map(m => m.desp), { bold: true });
+  add('DAS pago', meses.map(m => m.das), { bold: true });
+  sec('Resultado');
+  add('Rendimento líquido das aplicações', meses.map(m => m.rend));
+  add('Resultado do mês', meses.map(m => m.resultado), { bold: true, res: true });
+  const rec = soma(meses.map(m => m.receita)), res = soma(meses.map(m => m.resultado));
+  rows.push({ label: 'Margem sobre a receita', vals: meses.map(m => m.receita ? m.resultado / m.receita : null), total: rec ? res / rec : null, pct: true });
+  sec('Transferências para a conta pessoal');
+  add('Lucro isento', meses.map(m => m.retIsenta));
+  add('Lucro tributável', meses.map(m => m.retTrib));
+  add('Total transferido', meses.map(m => m.retiradas), { bold: true });
+  sec('Posição no fim do mês');
+  pos('Disponível (contas e espécie)', meses.map(m => m.disp));
+  pos('Aplicações', meses.map(m => m.inv));
+  pos('Lucro acumulado na empresa', meses.map(m => m.retido), { bold: true });
+  return { meses, rows, idxFim };
+}
+
+function viewDre() {
+  const { rows } = dreRows();
+  const cel = (v, r) => v == null ? '–' : r.pct ? pctf(v) : (v ? numBr(v) : '–');
+  const corpo = rows.map(r => {
+    if (r.sec) return `<tr class="secrow"><td colspan="14">${esc(r.sec)}</td></tr>`;
+    const cls = x => `r${r.res && x != null && x < 0 ? ' neg' : ''}`;
+    return `<tr class="${r.bold ? 'sum' : ''}"><td${r.ind ? ' style="padding-left:16px"' : ''}>${r.cor ? `<i class="dot" style="background:${r.cor}"></i>` : ''}${esc(r.label)}</td>${r.vals.map((v, i) => `<td class="${cls(v)}${S.ym === S.ano + '-' + pad2(i + 1) ? ' cur' : ''}">${cel(v, r)}</td>`).join('')}<td class="${cls(r.total)} tot">${cel(r.total, r)}</td></tr>`;
+  }).join('');
+  return `<div class="card">${cabImpr('Resultado de ' + S.ano + ', mês a mês (regime de caixa)')}
+    <h2>Resultado de ${S.ano}, mês a mês</h2>
+    <p class="small muted noprint" style="margin:4px 0 10px">Valores em reais. Despesas e DAS aparecem como positivos e já estão descontados do resultado. Na parte de posição, a coluna Total mostra o último mês realizado.</p>
+    <div class="noprint" style="margin-bottom:10px"><span class="small muted">Receitas por:</span> ${segRel('recby', [['ativ', 'Atividade'], ['cat', 'Categoria']], S.rel.recBy, 'recBy')}</div>
+    <div class="scroll"><table class="tbl dre"><thead><tr><th></th>${MESES.map((m, i) => `<th class="r${S.ym === S.ano + '-' + pad2(i + 1) ? ' cur' : ''}">${m}</th>`).join('')}<th class="r">Total</th></tr></thead><tbody>${corpo}</tbody></table></div>
+    ${acoesRel()}</div>`;
+}
+function dreCsv() {
+  const { rows } = dreRows();
+  const l = [['Demonstrativo ' + S.ano, ...MESES.map(m => m), 'Total'].join(';')];
+  rows.forEach(r => { if (r.sec) l.push(csvTxt(r.sec)); else l.push([csvTxt(r.label), ...r.vals.map(v => v == null ? '' : r.pct ? csvNum(v * 100) + '%' : csvNum(v)), r.total == null ? '' : r.pct ? csvNum(r.total * 100) + '%' : csvNum(r.total)].join(';')); });
+  return l.join('\n');
+}
+
+/* Extrato de conta */
+function histTx(t, id) {
+  const k = TIPOS[t.tipo].nome, extra = t.desc ? ' · ' + t.desc : '';
+  if (MOVE.includes(t.tipo)) { const [[o], [d]] = efeitos(t); return (o === id ? k + ' para ' + contaNome(d) : k + ' de ' + contaNome(o)) + extra; }
+  return (t.desc || k) + (t.cat ? ' · ' + t.cat : '');
+}
+function viewExtConta() {
+  const r = S.rel, per = periodo();
+  const id = S.cfg.contas.some(c => c.id === r.conta) ? r.conta : DEF_CC;
+  const ex = extratoConta(S.tx, S.cfg, id, per.de, per.ate);
+  const linhas = ex.linhas.map(l => `<tr><td>${fmtData(l.t.data)}</td><td style="min-width:180px;white-space:normal">${esc(histTx(l.t, id))}</td><td class="r pos">${l.ent ? numBr(l.ent) : ''}</td><td class="r neg">${l.sai ? numBr(l.sai) : ''}</td><td class="r">${numBr(l.saldo)}</td></tr>`).join('');
+  return `<div class="card">${cabImpr('Extrato de ' + contaNome(id) + ' · ' + per.label)}
+    <h2>Extrato de conta</h2>
+    <div class="noprint" style="display:grid;gap:10px;margin:10px 0">
+      <div class="field"><label for="rel_conta">Conta</label><select id="rel_conta" data-rel="conta">${S.cfg.contas.map(c => `<option value="${esc(c.id)}" ${c.id === id ? 'selected' : ''}>${esc(c.nome)}${c.ativa ? '' : ' (arquivada)'}</option>`).join('')}</select></div>
+      ${perCtl()}</div>
+    <p class="small muted printonly">${esc(contaNome(id))} · ${esc(per.label)}</p>
+    <div class="grid3" style="margin-bottom:10px">
+      <div class="kpi"><span class="eyebrow">Saldo inicial</span><span class="v">${brl(ex.ini)}</span></div>
+      <div class="kpi"><span class="eyebrow">Entradas</span><span class="v pos">${brl(ex.ent)}</span></div>
+      <div class="kpi"><span class="eyebrow">Saídas</span><span class="v neg">${brl(ex.sai)}</span></div>
+      <div class="kpi"><span class="eyebrow">Saldo final</span><span class="v">${brl(ex.fim)}</span></div></div>
+    <div class="scroll"><table class="tbl"><thead><tr><th>Data</th><th>Histórico</th><th class="r">Entrada</th><th class="r">Saída</th><th class="r">Saldo</th></tr></thead><tbody>
+      <tr><td></td><td><i>Saldo inicial</i></td><td></td><td></td><td class="r">${numBr(ex.ini)}</td></tr>
+      ${linhas || '<tr><td colspan="5" class="muted">Nenhuma movimentação neste período.</td></tr>'}
+      <tr class="sum"><td></td><td>Saldo final</td><td class="r">${numBr(ex.ent)}</td><td class="r">${numBr(ex.sai)}</td><td class="r">${numBr(ex.fim)}</td></tr></tbody></table></div>
+    ${acoesRel()}</div>`;
+}
+function extContaCsv() {
+  const r = S.rel, per = periodo(), id = S.cfg.contas.some(c => c.id === r.conta) ? r.conta : DEF_CC;
+  const ex = extratoConta(S.tx, S.cfg, id, per.de, per.ate);
+  return ['Data;Histórico;Entrada;Saída;Saldo', ';Saldo inicial;;;' + csvNum(ex.ini)].concat(ex.linhas.map(l => [l.t.data, csvTxt(histTx(l.t, id)), l.ent ? csvNum(l.ent) : '', l.sai ? csvNum(l.sai) : '', csvNum(l.saldo)].join(';'))).concat([';Saldo final;' + csvNum(ex.ent) + ';' + csvNum(ex.sai) + ';' + csvNum(ex.fim)]).join('\n');
+}
+
+/* Extrato por categoria (receitas ou despesas) */
+function viewExtCat() {
+  const r = S.rel, per = periodo(), kind = r.kind;
+  const lista = kind === 'receita' ? S.cfg.catsRec : S.cfg.catsDesp;
+  const usadas = [...new Set(S.tx.filter(t => t.tipo === kind).map(t => t.cat || (kind === 'receita' ? 'Sem categoria' : 'Outras despesas')))];
+  const todas = [...lista, ...usadas.filter(k => !lista.includes(k))];
+  const cat = r.cat === 'todas' || todas.includes(r.cat) ? r.cat : 'todas';
+  const ec = extratoCat(S.tx, kind, cat, per.de, per.ate);
+  const corpo = ec.grupos.map(g => `<tr class="secrow"><td colspan="4">${esc(g.cat)}</td><td class="r">${numBr(g.total)}</td></tr>` + g.itens.map(t => `<tr><td>${fmtData(t.data)}</td><td style="min-width:160px;white-space:normal">${esc(t.desc || TIPOS[t.tipo].nome)}</td><td>${t.fonte && t.fonte !== 'ger' ? esc(fonteNome(t.fonte)) : ''}</td><td>${esc(contaNome(efeitos(t)[0][0]))}</td><td class="r">${numBr(t.valor)}</td></tr>`).join('')).join('');
+  const nome = kind === 'receita' ? 'Receitas' : 'Despesas';
+  return `<div class="card">${cabImpr(nome + (cat === 'todas' ? '' : ' · ' + cat) + ' · ' + per.label)}
+    <h2>${nome} por categoria</h2>
+    <div class="noprint" style="display:grid;gap:10px;margin:10px 0">
+      ${segRel('relkind', [['despesa', 'Despesas'], ['receita', 'Receitas']], kind, 'kind')}
+      <div class="field"><label for="rel_cat">Categoria</label><select id="rel_cat" data-rel="cat"><option value="todas">Todas</option>${todas.map(k => `<option ${k === cat ? 'selected' : ''}>${esc(k)}</option>`).join('')}</select></div>
+      ${perCtl()}</div>
+    <div class="scroll"><table class="tbl"><thead><tr><th>Data</th><th>Descrição</th><th>Atividade</th><th>Conta</th><th class="r">Valor</th></tr></thead><tbody>
+      ${corpo || '<tr><td colspan="5" class="muted">Nenhum lançamento neste período.</td></tr>'}
+      <tr class="sum"><td colspan="4">Total de ${nome.toLowerCase()}</td><td class="r">${numBr(ec.total)}</td></tr></tbody></table></div>
+    ${acoesRel()}</div>`;
+}
+function extCatCsv() {
+  const r = S.rel, per = periodo(), ec = extratoCat(S.tx, r.kind, r.cat, per.de, per.ate);
+  const l = ['Categoria;Data;Descrição;Atividade;Conta;Valor'];
+  ec.grupos.forEach(g => g.itens.forEach(t => l.push([csvTxt(g.cat), t.data, csvTxt(t.desc || ''), csvTxt(t.fonte && t.fonte !== 'ger' ? fonteNome(t.fonte) : ''), csvTxt(contaNome(efeitos(t)[0][0])), csvNum(t.valor)].join(';'))));
+  l.push(';;;;Total;' + csvNum(ec.total));
+  return l.join('\n');
+}
+const relCsv = () => S.rel.sub === 'conta' ? extContaCsv() : S.rel.sub === 'cat' ? extCatCsv() : dreCsv();
+const relNomeArq = () => S.rel.sub === 'conta' ? 'extrato-' + slug(contaNome(S.rel.conta)) + '.csv' : S.rel.sub === 'cat' ? (S.rel.kind === 'receita' ? 'receitas' : 'despesas') + '-por-categoria.csv' : 'resultado-' + S.ano + '.csv';
 /* ===== Interações e inicialização ===== */
 const HINTS = {
   receita: 'Dinheiro que entrou pelo seu trabalho. Conta no limite do MEI.',
   despesa: 'Gasto pago pela conta da empresa. Reduz o resultado.',
-  aplicacao: 'Sai da conta corrente e vai para investimento. Não é despesa.',
-  resgate: 'Volta da aplicação para a conta corrente. Não é receita.',
+  aplicacao: 'Sai de uma conta e vai para uma aplicação. Não é despesa.',
+  resgate: 'Volta de uma aplicação para uma conta. Não é receita.',
+  transf: 'Move dinheiro entre contas da empresa, como sacar para o caixa em espécie. Não é receita nem despesa.',
   rendimento: 'Ganho já líquido de imposto. Entra no resultado, fora do faturamento.',
   ret_isenta: 'Transferência para sua conta pessoal dentro do teto isento.',
   ret_trib: 'Parte do lucro acima do isento. Vai para o seu IRPF.',
   aporte: 'Dinheiro seu colocado na empresa. Não é receita.'
 };
-const parseNum = s => { s = String(s).trim().replace(/[R$\s]/g, ''); if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.'); const n = Number(s); return isFinite(n) ? n : NaN; };
+const parseNum = s => { s = String(s).trim().replace(/[R$\s]/g, ''); if (s.includes(',') || /^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '').replace(',', '.'); const n = Number(s); return isFinite(n) ? n : NaN; };
 let toastT = null;
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, 2800); }
 function closeSheet() { $('#sheetbg').hidden = true; $('#sheetbg').innerHTML = ''; }
@@ -916,45 +1273,77 @@ function openStart() {
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="startok">Começar do zero</button><button class="btn alt" data-act="close">Continuar vendo o exemplo</button></div>`);
 }
 
+const ROLE = { receita: ['disp', 'Entrou na conta'], aporte: ['disp', 'Entrou na conta'], despesa: ['disp', 'Saiu da conta'], ret_isenta: ['disp', 'Saiu da conta'], ret_trib: ['disp', 'Saiu da conta'], rendimento: ['inv', 'Aplicação'], aplicacao: ['disp', 'Origem', 'inv'], resgate: ['inv', 'Origem', 'disp'], transf: ['todas', 'Origem', 'todas'] };
+const contasPara = (papel, atual) => S.cfg.contas.filter(c => (papel === 'inv' ? c.tipo === 'aplicacao' : papel === 'disp' ? c.tipo !== 'aplicacao' : true) && (c.ativa || c.id === atual));
+
 function openForm(t) {
   if (S.example) { openStart(); return; }
   const edit = t && t.id;
-  const d = { tipo: 'receita', data: hojeISO, valor: '', desc: '', fonte: 'com', cat: 'Software e assinaturas', nf: true, comp: '', ...(t || {}) };
-  const grupos = [['Entradas', ['receita', 'aporte', 'resgate']], ['Saídas', ['despesa', 'aplicacao']], ['Transferências para você', ['ret_isenta', 'ret_trib']], ['Aplicações', ['rendimento']]];
+  const d = { tipo: 'receita', data: hojeISO, valor: '', desc: '', fonte: 'com', cat: '', nf: true, comp: '', conta: '', destino: '', ...(t || {}) };
+  const ef0 = edit ? efeitos(d) : [];
+  const pConta = d.conta || (ef0[0] ? ef0[0][0] : ''), pDest = d.destino || (ef0[1] ? ef0[1][0] : '');
+  const grupos = [['Entradas', ['receita', 'aporte']], ['Saídas', ['despesa']], ['Entre contas', ['aplicacao', 'resgate', 'transf']], ['Para você', ['ret_isenta', 'ret_trib']], ['Aplicações', ['rendimento']]];
   openSheet(`<h2>${edit ? 'Editar lançamento' : 'Novo lançamento'}</h2>
     <form id="fTx" style="display:grid;gap:12px" novalidate>
       <div class="field"><label for="f_tipo">Tipo</label><select id="f_tipo">${grupos.map(([g, ks]) => `<optgroup label="${g}">${ks.map(k => `<option value="${k}" ${d.tipo === k ? 'selected' : ''}>${TIPOS[k].nome}</option>`).join('')}</optgroup>`).join('')}</select><span class="small muted" id="f_hint"></span></div>
       <div class="frow"><div class="field"><label for="f_valor">Valor (R$)</label><input id="f_valor" inputmode="decimal" placeholder="0,00" value="${d.valor === '' ? '' : String(d.valor).replace('.', ',')}"></div>
         <div class="field"><label for="f_data">Data</label><input id="f_data" type="date" value="${esc(d.data)}"></div></div>
+      <div class="frow"><div class="field" id="g_conta"><label for="f_conta" id="l_conta">Conta</label><select id="f_conta"></select></div>
+        <div class="field" id="g_dest"><label for="f_dest">Destino</label><select id="f_dest"></select></div></div>
       <div class="field" id="g_fonte"><span class="l">Atividade</span><div class="seg" id="f_fonte">${[...S.cfg.fontes, { id: 'ger', nome: 'Geral' }].map(f => `<label data-f="${f.id}"><input type="radio" name="fonte" value="${f.id}" ${d.fonte === f.id ? 'checked' : ''}><span>${esc(f.nome)}</span></label>`).join('')}</div></div>
-      <div class="field" id="g_cat"><label for="f_cat">Categoria</label><select id="f_cat">${CATS.map(c => `<option ${d.cat === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+      <div class="field" id="g_cat"><label for="f_cat">Categoria</label><select id="f_cat"></select></div>
       <div class="field" id="g_comp"><label for="f_comp">Competência do DAS</label><input id="f_comp" type="month" value="${esc(d.comp)}"></div>
       <label class="check" id="g_nf"><input type="checkbox" id="f_nf" ${d.nf ? 'checked' : ''}> Com nota fiscal emitida</label>
       <div class="field"><label for="f_desc">Descrição ou cliente</label><input id="f_desc" value="${esc(d.desc)}" placeholder="Ex.: Mensalidades da turma, Cliente A"></div>
       <p class="small neg" id="f_err" role="alert" hidden></p>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" type="submit">Salvar</button><button class="btn alt" type="button" data-act="close">Cancelar</button></div>
     </form>`);
+  const fill = (sel, papel, prefer) => {
+    const cur = prefer || sel.value, lista = contasPara(papel, cur);
+    sel.innerHTML = lista.map(c => `<option value="${esc(c.id)}">${esc(c.nome)}${c.ativa ? '' : ' (arquivada)'}</option>`).join('');
+    if (lista.some(c => c.id === cur)) sel.value = cur;
+  };
+  const fillCat = (tp, prefer) => {
+    const sel = $('#f_cat'), base = tp === 'receita' ? S.cfg.catsRec : S.cfg.catsDesp;
+    const ops = (tp === 'receita' ? [''] : []).concat(base, prefer && !base.includes(prefer) ? [prefer] : []);
+    sel.innerHTML = ops.map(k => `<option value="${esc(k)}">${k === '' ? '(sem categoria)' : esc(k)}</option>`).join('');
+    sel.value = prefer !== null && ops.includes(prefer) ? prefer : (tp === 'receita' ? (base[0] || '') : (base.find(k => k !== 'DAS MEI') || base[0]));
+  };
+  let primeira = true;
   const sync = () => {
-    const tp = $('#f_tipo').value;
+    const tp = $('#f_tipo').value, rl = ROLE[tp];
     $('#f_hint').textContent = HINTS[tp];
     $('#g_fonte').hidden = !(tp === 'receita' || tp === 'despesa');
-    $('#g_cat').hidden = tp !== 'despesa';
+    $('#g_cat').hidden = !(tp === 'despesa' || tp === 'receita');
     $('#g_nf').hidden = tp !== 'receita';
+    $('#g_dest').hidden = !rl[2];
+    $('#l_conta').textContent = rl[1];
+    fill($('#f_conta'), rl[0], primeira ? pConta : '');
+    if (rl[2]) fill($('#f_dest'), rl[2], primeira ? pDest : '');
+    if (tp === 'receita' || tp === 'despesa') fillCat(tp, primeira && edit ? (d.cat || '') : null);
     $('#g_comp').hidden = !(tp === 'despesa' && $('#f_cat').value === 'DAS MEI');
     document.querySelectorAll('#f_fonte label').forEach(l => { l.hidden = tp === 'receita' && l.dataset.f === 'ger'; });
     if (tp === 'receita' && document.querySelector('input[name=fonte]:checked')?.value === 'ger') document.querySelector('input[name=fonte][value=com]').checked = true;
     if (tp === 'despesa' && $('#f_cat').value === 'DAS MEI' && !$('#f_valor').value) $('#f_valor').value = String(S.cfg.das).replace('.', ',');
+    primeira = false;
   };
-  $('#f_tipo').addEventListener('change', sync); $('#f_cat').addEventListener('change', sync); sync();
+  $('#f_tipo').addEventListener('change', sync);
+  $('#f_cat').addEventListener('change', () => { const tp = $('#f_tipo').value; $('#g_comp').hidden = !(tp === 'despesa' && $('#f_cat').value === 'DAS MEI'); if (!$('#g_comp').hidden && !$('#f_valor').value) $('#f_valor').value = String(S.cfg.das).replace('.', ','); });
+  sync();
   $('#fTx').addEventListener('submit', async e => {
     e.preventDefault();
-    const tipo = $('#f_tipo').value, valor = parseNum($('#f_valor').value), data = $('#f_data').value;
+    const tipo = $('#f_tipo').value, valor = parseNum($('#f_valor').value), data = $('#f_data').value, rl = ROLE[tipo];
     const err = m => { const p = $('#f_err'); p.textContent = m; p.hidden = false; };
     if (!(valor > 0)) return err('Informe um valor maior que zero.');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return err('Informe a data do lançamento.');
-    const o = { id: edit ? t.id : newId(), tipo, data, valor: r2(valor), desc: $('#f_desc').value.trim() };
+    const conta = $('#f_conta').value, destino = rl[2] ? $('#f_dest').value : '';
+    if (!conta) return err(rl[0] === 'inv' ? 'Cadastre uma conta do tipo aplicação na aba Contas.' : 'Escolha a conta.');
+    if (rl[2] && !destino) return err('Escolha a conta de destino. Se ela não existe, cadastre na aba Contas.');
+    if (rl[2] && conta === destino) return err('Origem e destino precisam ser contas diferentes.');
+    const o = { id: edit ? t.id : newId(), tipo, data, valor: r2(valor), desc: $('#f_desc').value.trim(), conta };
+    if (rl[2]) o.destino = destino;
     if (tipo === 'receita' || tipo === 'despesa') o.fonte = document.querySelector('input[name=fonte]:checked')?.value || 'com';
-    if (tipo === 'receita') o.nf = $('#f_nf').checked;
+    if (tipo === 'receita') { o.nf = $('#f_nf').checked; if ($('#f_cat').value) o.cat = $('#f_cat').value; }
     if (tipo === 'despesa') { o.cat = $('#f_cat').value; if (o.cat === 'DAS MEI') { o.comp = $('#f_comp').value; if (!o.comp) return err('Informe a competência do DAS (o mês a que ele se refere).'); } }
     try { await Store.saveTx(o); } catch (x) { return err('Não foi possível salvar agora. Tente de novo.'); }
     S.ano = yOf(data); S.ym = ymOf(data); closeSheet(); render(); toast(edit ? 'Lançamento atualizado' : 'Lançamento salvo');
@@ -970,7 +1359,64 @@ async function saveFile(filename, data, label) {
   }
   try { await dl.save({ filename, data }); toast(label + ' salvo'); } catch (e) { if (e && e.code !== 'declined') toast('Não foi possível salvar o arquivo.'); }
 }
-const txCsv = () => ['Data;Tipo;Atividade;Categoria;Valor;Nota fiscal;Competência DAS;Descrição'].concat([...S.tx].sort((a, b) => a.data.localeCompare(b.data)).map(t => [t.data, TIPOS[t.tipo].nome, t.fonte ? fonteNome(t.fonte) : '', t.cat || '', Number(t.valor).toFixed(2).replace('.', ','), t.tipo === 'receita' ? (t.nf ? 'sim' : 'não') : '', t.comp || '', '"' + String(t.desc || '').replace(/"/g, '""') + '"'].join(';'))).join('\n');
+const txCsv = () => ['Data;Tipo;Atividade;Categoria;Valor;Nota fiscal;Competência DAS;Conta;Conta destino;Descrição'].concat([...S.tx].sort((a, b) => a.data.localeCompare(b.data)).map(t => [t.data, TIPOS[t.tipo].nome, t.fonte ? fonteNome(t.fonte) : '', t.cat || '', Number(t.valor).toFixed(2).replace('.', ','), t.tipo === 'receita' ? (t.nf ? 'sim' : 'não') : '', t.comp || '', contaNome(efeitos(t)[0][0]), efeitos(t)[1] ? contaNome(efeitos(t)[1][0]) : '', '"' + String(t.desc || '').replace(/"/g, '""') + '"'].join(';'))).join('\n');
+
+async function acaoConta(a, el) {
+  const salvar = async ok => { try { await Store.saveCfg(); render(); if (ok) toast(ok); } catch (x) { toast('Não foi possível salvar agora.'); } };
+  const cs = S.cfg.contas;
+  if (a === 'ctSave') {
+    for (const c of cs) {
+      const nome = ($('#ct_n_' + c.id) || {}).value, s0 = parseNum(($('#ct_s_' + c.id) || {}).value || '0');
+      if (!nome || !nome.trim() || !isFinite(s0)) { toast('Confira o nome e o saldo de ' + c.nome + '.'); return; }
+      if (cs.some(o => o !== c && slug(o.nome) === slug(nome))) { toast('Já existe outra conta chamada ' + nome.trim() + '.'); return; }
+    }
+    for (const c of cs) { c.nome = $('#ct_n_' + c.id).value.trim(); c.saldo0 = r2(parseNum($('#ct_s_' + c.id).value || '0')); }
+    await salvar('Contas salvas');
+  } else if (a === 'ctAdd') {
+    const nome = $('#ct_new_n').value.trim(), tipo = $('#ct_new_t').value, s0 = parseNum($('#ct_new_s').value || '0');
+    if (!nome) { toast('Dê um nome para a conta.'); return; }
+    if (!isFinite(s0)) { toast('Saldo inicial inválido.'); return; }
+    if (cs.some(o => slug(o.nome) === slug(nome))) { toast('Já existe uma conta com esse nome.'); return; }
+    let id = slug(nome) || 'conta', k = 2; while (cs.some(o => o.id === id)) id = slug(nome) + '-' + k++;
+    cs.push({ id, nome, tipo, saldo0: r2(s0), ativa: true });
+    await salvar('Conta adicionada');
+  } else if (a === 'ctArq') {
+    const c = cs.find(x => x.id === el.dataset.id); if (!c) return;
+    if (c.ativa) {
+      const saldo = balances(S.tx, S.cfg).por[c.id] || 0;
+      if (Math.abs(saldo) >= 0.005) { toast('Só dá para arquivar conta com saldo zero. Transfira o saldo para outra conta antes.'); return; }
+      if (c.tipo !== 'aplicacao' && cs.filter(x => x.ativa && x.tipo !== 'aplicacao').length <= 1) { toast('Precisa existir pelo menos uma conta corrente ou caixa ativo.'); return; }
+    }
+    c.ativa = !c.ativa; await salvar(c.ativa ? 'Conta reativada' : 'Conta arquivada');
+  } else if (a === 'ctDel') {
+    const c = cs.find(x => x.id === el.dataset.id); if (!c || c.id === DEF_CC || c.id === DEF_INV || contaUsada(c.id)) { toast('Essa conta tem lançamentos. Arquive em vez de remover.'); return; }
+    S.cfg.contas = cs.filter(x => x.id !== c.id); await salvar('Conta removida');
+  }
+}
+async function acaoCat(a, el) {
+  const kind = el.dataset.kind, nome = el.dataset.nome, key = kind + '|' + nome;
+  const campo = kind === 'receita' ? 'catsRec' : 'catsDesp', lista = S.cfg[campo];
+  const salvar = async ok => { try { await Store.saveCfg(); render(); if (ok) toast(ok); } catch (x) { toast('Não foi possível salvar agora.'); } };
+  if (a === 'catAdd') {
+    const n = ($('#catadd_' + kind).value || '').trim();
+    if (!n) { toast('Digite o nome da categoria.'); return; }
+    if (lista.some(x => slug(x) === slug(n))) { toast('Essa categoria já existe.'); return; }
+    lista.push(n); await salvar('Categoria adicionada');
+  } else if (a === 'catDel') { S.catPend = key; render(); }
+  else if (a === 'catDelOk') {
+    if (nome === 'DAS MEI') return;
+    S.cfg[campo] = lista.filter(x => x !== nome); S.catPend = null; await salvar('Categoria removida da lista');
+  } else if (a === 'catRen') { S.catEdit = { key }; render(); const i = $('#cat_novo'); if (i) { i.focus(); i.select(); } }
+  else if (a === 'catRenCancel') { S.catEdit = null; render(); }
+  else if (a === 'catRenOk') {
+    const novo = ($('#cat_novo').value || '').trim(); S.catEdit = null;
+    if (!novo || novo === nome || nome === 'DAS MEI') { render(); return; }
+    const mudou = S.tx.filter(t => t.tipo === kind && t.cat === nome).map(t => ({ ...t, cat: novo }));
+    const dup = lista.some(x => x !== nome && slug(x) === slug(novo));
+    S.cfg[campo] = dup ? lista.filter(x => x !== nome) : lista.map(x => x === nome ? novo : x);
+    try { if (mudou.length) await Store.saveMany(mudou); await Store.saveCfg(); render(); toast(mudou.length ? 'Categoria renomeada em ' + mudou.length + ' lançamento(s)' : 'Categoria renomeada'); } catch (x) { toast('Não foi possível salvar agora.'); render(); }
+  }
+}
 
 function readNum(id, min, max) { const n = parseNum($(id).value); return isFinite(n) ? Math.min(max, Math.max(min, n)) : null; }
 
@@ -978,7 +1424,12 @@ document.addEventListener('click', async e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const a = el.dataset.act;
   if (a === 'tab') { S.tab = el.dataset.v; delPend = null; render(); window.scrollTo(0, 0); }
-  else if (a === 'novo') openForm({ tipo: el.dataset.tipo || 'receita', valor: el.dataset.valor ? Number(el.dataset.valor) : '', desc: el.dataset.tipo && el.dataset.tipo.startsWith('ret') ? 'Transferência para conta pessoal' : '' });
+  else if (a === 'novo') {
+    const o = { tipo: el.dataset.tipo || 'receita', valor: el.dataset.valor ? Number(el.dataset.valor) : '', desc: el.dataset.tipo && el.dataset.tipo.startsWith('ret') ? 'Transferência para conta pessoal' : el.dataset.tipo === 'rendimento' ? 'Rendimento líquido' : '' };
+    if (el.dataset.conta) o.conta = el.dataset.conta;
+    if (el.dataset.data) o.data = el.dataset.data;
+    openForm(o);
+  }
   else if (a === 'edit') openForm(S.tx.find(t => t.id === el.dataset.id));
   else if (a === 'del') { delPend = el.dataset.id; render(); }
   else if (a === 'delok') { try { await Store.delTx(el.dataset.id); toast('Lançamento excluído'); } catch (x) { toast('Não foi possível excluir agora.'); } delPend = null; render(); }
@@ -987,9 +1438,9 @@ document.addEventListener('click', async e => {
   else if (a === 'startok') { try { await Store.start(); } catch (x) { toast('Não foi possível iniciar agora.'); } closeSheet(); render(); toast('Caixa vazio. Pode lançar.'); }
   else if (a === 'saveCfg') {
     const c = S.cfg, nome = $('#c_nome').value.trim();
-    const das = readNum('#c_das', 0, 1000), lim = readNum('#c_limite', 1000, 10000000), pct = readNum('#c_pct', 0, 100), pres = readNum('#c_pres', 0, 100), rcx = readNum('#c_rcx', 0, 100), rir = readNum('#c_rir', 0, 100), cmin = readNum('#c_cmin', 0, 10000000), alvo = readNum('#c_alvo', 0, 10000000), lucro = readNum('#c_lucro', 0, 100000000), cc0 = readNum('#c_cc0', -10000000, 100000000), inv0 = readNum('#c_inv0', 0, 100000000);
-    if ([das, lim, pct, pres, rcx, rir, cmin, alvo, lucro, cc0, inv0].some(v => v === null)) { toast('Confira os números: algum campo está inválido.'); return; }
-    Object.assign(c, { nome: nome || 'Meu MEI', das, limite: lim, pctIsento: pct, presuncao: pres, reservaCaixa: rcx, reservaIR: rir, caixaMin: cmin, retiradaAlvo: alvo, lucroInicial: lucro, saldoCC0: cc0, saldoInv0: inv0, abertura: $('#c_abertura').value, descontaDas: $('#c_das_abate').checked });
+    const das = readNum('#c_das', 0, 1000), lim = readNum('#c_limite', 1000, 10000000), pct = readNum('#c_pct', 0, 100), pres = readNum('#c_pres', 0, 100), rcx = readNum('#c_rcx', 0, 100), rir = readNum('#c_rir', 0, 100), cmin = readNum('#c_cmin', 0, 10000000), alvo = readNum('#c_alvo', 0, 10000000), lucro = readNum('#c_lucro', 0, 100000000);
+    if ([das, lim, pct, pres, rcx, rir, cmin, alvo, lucro].some(v => v === null)) { toast('Confira os números: algum campo está inválido.'); return; }
+    Object.assign(c, { nome: nome || 'Meu MEI', das, limite: lim, pctIsento: pct, presuncao: pres, reservaCaixa: rcx, reservaIR: rir, caixaMin: cmin, retiradaAlvo: alvo, lucroInicial: lucro, abertura: $('#c_abertura').value, descontaDas: $('#c_das_abate').checked });
     try { await Store.saveCfg(); toast('Ajustes salvos'); } catch (x) { toast('Não foi possível salvar agora.'); } render();
   }
   else if (a === 'gconnect') { GS.busy = true; GS.err = ''; render(); try { await Store.gConnect(true); } catch (x) { GS.err = /popup|closed|access_denied|cancel/i.test(x.message) ? 'Login cancelado ou permissão negada. Tente de novo.' : 'Não foi possível conectar: ' + x.message; } GS.busy = false; render(); }
@@ -997,23 +1448,29 @@ document.addEventListener('click', async e => {
   else if (a === 'gdisc') { Store.gDisconnect(); render(); }
   else if (a === 'conferir') {
     const dt = $('#cf_data').value, out = $('#cfRes');
-    const ccv = $('#cf_cc').value.trim(), invv = $('#cf_inv').value.trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dt) || (!ccv && !invv)) { out.innerHTML = '<p class="small neg" style="margin-top:8px">Informe a data e pelo menos um saldo do extrato.</p>'; return; }
+    const msg = m => { out.innerHTML = `<p class="small neg" style="margin-top:8px">${m}</p>`; };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) return msg('Informe a data do extrato.');
     const b = balances(S.tx.filter(t => t.data <= dt), S.cfg);
-    const bloco = (nome, app, txt, inv) => {
-      if (!txt) return '';
-      const v = parseNum(txt); if (!isFinite(v)) return `<p class="small neg" style="margin-top:8px">O saldo de ${nome} não é um número válido.</p>`;
-      const d = r2(v - app), ok = Math.abs(d) < 0.005;
+    let html = '', n = 0;
+    for (const c of S.cfg.contas.filter(x => x.ativa)) {
+      const el = $('#cfc_' + c.id), txt = el ? el.value.trim() : ''; if (!txt) continue; n++;
+      const v = parseNum(txt); if (!isFinite(v)) { html += `<p class="small neg" style="margin-top:8px">O saldo de ${esc(c.nome)} não é um número válido.</p>`; continue; }
+      const app = b.por[c.id] || 0, d = r2(v - app), ok = Math.abs(d) < 0.005, inv = c.tipo === 'aplicacao';
       let dica = '';
       if (!ok && !inv) dica = d > 0 ? `<p class="small" style="margin-top:6px">O extrato tem ${brl(d)} a mais. Provável receita ou resgate sem lançar, ou uma saída lançada a mais.</p>` : `<p class="small" style="margin-top:6px">O extrato tem ${brl(-d)} a menos. Provável despesa, tarifa, DAS ou transferência sem lançar, ou uma entrada lançada a mais.</p>`;
-      if (!ok && inv) dica = d > 0 ? `<p class="small" style="margin-top:6px">A aplicação tem ${brl(d)} a mais. Provável rendimento sem lançar.</p><button class="btn sm" style="margin-top:6px" data-act="novo" data-tipo="rendimento" data-valor="${d}">Lançar como rendimento líquido</button>` : `<p class="small" style="margin-top:6px">A aplicação tem ${brl(-d)} a menos. Provável imposto retido, aplicação ou resgate sem lançar.</p>`;
-      return `<div class="card flat" style="margin-top:8px"><div class="step" style="border:0"><b>${nome}</b><span class="pill ${ok ? 'ok' : 'bad'}">${ok ? 'Bateu' : 'Diferença ' + sinal(d)}</span></div><div class="step"><span>No extrato</span><span class="n">${brl(v)}</span></div><div class="step"><span>No app</span><span class="n">${brl(app)}</span></div>${dica}</div>`;
-    };
-    out.innerHTML = bloco('Conta corrente', b.cc, ccv, false) + bloco('Aplicações', b.inv, invv, true);
+      if (!ok && inv) dica = d > 0 ? `<p class="small" style="margin-top:6px">O saldo do banco tem ${brl(d)} a mais que o app. Se você não aplicou nada novo, é o rendimento líquido do período.</p><button class="btn sm" style="margin-top:6px" data-act="novo" data-tipo="rendimento" data-valor="${d}" data-conta="${esc(c.id)}" data-data="${esc(dt)}">Lançar rendimento de ${brl(d)}</button>` : `<p class="small" style="margin-top:6px">O saldo do banco tem ${brl(-d)} a menos que o app. Provável resgate, imposto retido ou aplicação sem lançar.</p>`;
+      html += `<div class="card flat" style="margin-top:8px"><div class="step" style="border:0"><b>${esc(c.nome)}</b><span class="pill ${ok ? 'ok' : 'bad'}">${ok ? 'Bateu' : 'Diferença ' + sinal(d)}</span></div><div class="step"><span>No extrato</span><span class="n">${brl(v)}</span></div><div class="step"><span>No app</span><span class="n">${brl(app)}</span></div>${dica}</div>`;
+    }
+    if (!n) return msg('Digite o saldo de pelo menos uma conta.');
+    out.innerHTML = html;
   }
+  else if (a === 'relCsv') saveFile(relNomeArq(), relCsv(), 'Relatório');
+  else if (a === 'relPrint') { try { window.print(); } catch (x) { toast('Impressão indisponível aqui. Baixe a planilha.'); } }
+  else if (a === 'ctSave' || a === 'ctAdd' || a === 'ctArq' || a === 'ctDel') await acaoConta(a, el);
+  else if (a.startsWith('cat')) await acaoCat(a, el);
   else if (a === 'rmrbCsv') saveFile('receitas-brutas-' + S.ano + '.csv', rmrbCsv(), 'Relatório');
   else if (a === 'rmrbCopy') { try { await navigator.clipboard.writeText(rmrbCsv().replace(/;/g, '\t')); toast('Texto copiado'); } catch (x) { openSheet(`<h2>Copie o texto</h2><textarea id="cp" rows="12" style="width:100%;font-family:var(--f-mono);font-size:.8rem">${esc(rmrbCsv().replace(/;/g, '\t'))}</textarea><button class="btn alt" data-act="close">Fechar</button>`); const ta = $('#cp'); ta.focus(); ta.select(); } }
-  else if (a === 'exportJson') saveFile('caixa-mei-backup.json', JSON.stringify({ versao: 1, cfg: S.cfg, tx: S.tx }, null, 1), 'Backup');
+  else if (a === 'exportJson') saveFile('caixa-mei-backup.json', JSON.stringify({ versao: 2, cfg: S.cfg, tx: S.tx }, null, 1), 'Backup');
   else if (a === 'exportCsv') saveFile('lancamentos.csv', txCsv(), 'Arquivo');
 });
 document.addEventListener('change', async e => {
@@ -1021,6 +1478,7 @@ document.addEventListener('change', async e => {
   if (t.id === 'selMes') { S.ym = t.value; render(); }
   else if (t.id === 'selAno') { S.ano = Number(t.value); S.ym = S.ano + S.ym.slice(4); render(); }
   else if (t.dataset && t.dataset.act === 'filtro') { S.filtro = t.value; render(); }
+  else if (t.dataset && t.dataset.rel) { S.rel[t.dataset.rel] = t.value; if (t.dataset.rel === 'kind') S.rel.cat = 'todas'; render(); }
   else if (t.id === 'impFile' && t.files[0]) {
     const rd = new FileReader();
     rd.onload = async () => {
@@ -1028,7 +1486,7 @@ document.addEventListener('change', async e => {
         const d = JSON.parse(rd.result); if (!d || !Array.isArray(d.tx)) throw new Error('formato');
         const ok = d.tx.filter(x => x && TIPOS[x.tipo] && /^\d{4}-\d{2}-\d{2}$/.test(x.data) && Number(x.valor) > 0);
         if (S.example) { S.tx = []; S.example = false; }
-        if (d.cfg) S.cfg = { ...DEFAULT_CFG, ...d.cfg, fontes: DEFAULT_CFG.fontes };
+        if (d.cfg) S.cfg = mkCfg(d.cfg);
         await Store.saveCfg();
         await Store.saveMany(ok.map(x => ({ ...x, id: x.id || newId() })));
         toast(ok.length + ' lançamentos importados'); render();
@@ -1042,10 +1500,10 @@ document.addEventListener('click', e => { if (e.target.id === 'sheetbg') closeSh
 
 function render() {
   renderHeader(); renderNav();
-  const v = { painel: viewPainel, lanc: viewLanc, apur: viewApur, obrig: viewObrig, ajustes: viewAjustes }[S.tab];
+  const v = { painel: viewPainel, lanc: viewLanc, apur: viewApur, rel: viewRel, contas: viewContas, obrig: viewObrig, ajustes: viewAjustes }[S.tab];
   const precisaConectar = Store.mode === 'sheets' && !GS.connected;
   $('#view').innerHTML = precisaConectar ? viewConectar() : v();
-  $('#fab').hidden = precisaConectar || S.tab === 'ajustes';
+  $('#fab').hidden = precisaConectar || S.tab === 'ajustes' || S.tab === 'rel';
 }
 const aoMudar = () => { const ae = document.activeElement; const digitando = ae && ['INPUT', 'SELECT', 'TEXTAREA'].includes(ae.tagName) && ae.closest('#view'); if (S.tab !== 'ajustes' && $('#sheetbg').hidden && !digitando) render(); else renderHeader(); };
 if (window.MEI_CONFIG && window.MEI_CONFIG.googleClientId) {
@@ -1058,7 +1516,6 @@ if (window.MEI_CONFIG && window.MEI_CONFIG.googleClientId) {
   render();
   Store.init(aoMudar);
 }
-
 </script>
 </body>
 </html>
