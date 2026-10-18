@@ -198,6 +198,9 @@ const DEFAULT_CFG = {
   caixaMin: 2000,        // colchão mínimo que fica nas contas e no caixa em espécie
   reservaIR: 0,          // % estimada para separar para o IRPF do tributável
   abertura: '',          // AAAA-MM, só preencher se abriu o MEI no ano corrente
+  dasCat: 'DAS MEI',     // nome da categoria que é a DAS (o app a reconhece por marcador, não pelo texto exato)
+  fechadoAte: '',        // AAAA-MM: meses até este estão fechados (travados no app)
+  fechamentos: {},       // assinatura dos números de cada mês fechado
   contas: [
     { id: DEF_CC, nome: 'Conta corrente', tipo: 'corrente', saldo0: 0, ativa: true },
     { id: DEF_INV, nome: 'Aplicações', tipo: 'aplicacao', saldo0: 0, ativa: true }
@@ -221,6 +224,9 @@ const TIPOS = {
   aporte:    { nome: 'Aporte do titular' }
 };
 const slug = s => String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+// A DAS é um marcador: o nome configurado e variações comuns ("DAS", "DAS-MEI", "DAS MEI 06/2025") contam como DAS
+let DAS_SLUG = 'das-mei';
+const isDasCat = c => { const q = slug(c); return !!q && (q === DAS_SLUG || q === 'das' || q.startsWith('das-')); };
 
 // Normaliza a configuração vinda do disco: migra saldos antigos para contas e garante as listas de categorias
 function mkCfg(o) {
@@ -233,8 +239,12 @@ function mkCfg(o) {
   c.contas = contas;
   const lista = (v, def) => { const a = Array.isArray(v) ? v.map(x => String(x).trim()).filter(Boolean) : []; return a.length ? [...new Set(a)] : def.slice(); };
   c.catsRec = lista(o.catsRec, CATS_REC);
-  c.catsDesp = lista(o.catsDesp, CATS).filter(x => x !== 'DAS MEI');
-  c.catsDesp.unshift('DAS MEI');
+  c.dasCat = String(o.dasCat || 'DAS MEI').trim() || 'DAS MEI';
+  DAS_SLUG = slug(c.dasCat);
+  c.catsDesp = lista(o.catsDesp, CATS).filter(x => !isDasCat(x));
+  c.catsDesp.unshift(c.dasCat);
+  c.fechadoAte = /^\d{4}-\d{2}$/.test(o.fechadoAte || '') ? o.fechadoAte : '';
+  c.fechamentos = o.fechamentos && typeof o.fechamentos === 'object' ? { ...o.fechamentos } : {};
   delete c.saldoCC0; delete c.saldoInv0;
   return c;
 }
@@ -277,7 +287,7 @@ function totals(txs) {
   for (const x of txs) {
     const v = Number(x.valor) || 0;
     if (x.tipo === 'receita') { t.receita += v; t.porFonte[x.fonte] = (t.porFonte[x.fonte] || 0) + v; if (x.nf) t.comNF += v; else t.semNF += v; }
-    else if (x.tipo === 'despesa') { if (x.cat === 'DAS MEI') t.das += v; else t.desp += v; }
+    else if (x.tipo === 'despesa') { if (isDasCat(x.cat)) t.das += v; else t.desp += v; }
     else if (x.tipo === 'rendimento') t.rend += v;
     else if (x.tipo === 'ret_isenta') t.retIsenta += v;
     else if (x.tipo === 'ret_trib') t.retTrib += v;
@@ -376,7 +386,7 @@ function statusDas(txs, ano, cfg, hoje) {
   const out = [];
   for (let m = 1; m <= 12; m++) {
     const comp = ano + '-' + String(m).padStart(2, '0');
-    const pagos = txs.filter(t => t.tipo === 'despesa' && t.cat === 'DAS MEI' && (t.comp ? t.comp === comp : false));
+    const pagos = txs.filter(t => t.tipo === 'despesa' && isDasCat(t.cat) && (t.comp ? t.comp === comp : false));
     const venc = m === 12 ? (ano + 1) + '-01-20' : ano + '-' + String(m + 1).padStart(2, '0') + '-20';
     const pago = r2(pagos.reduce((s, t) => s + Number(t.valor), 0));
     let st = 'futuro';
@@ -433,7 +443,7 @@ function dreAno(txs, ano, cfg) {
     const catDesp = {}, catRec = {};
     for (const x of tx) {
       const v = Number(x.valor) || 0;
-      if (x.tipo === 'despesa' && x.cat !== 'DAS MEI') { const k = x.cat || 'Outras despesas'; catDesp[k] = (catDesp[k] || 0) + v; }
+      if (x.tipo === 'despesa' && !isDasCat(x.cat)) { const k = x.cat || 'Outras despesas'; catDesp[k] = (catDesp[k] || 0) + v; }
       else if (x.tipo === 'receita') { const k = x.cat || 'Sem categoria'; catRec[k] = (catRec[k] || 0) + v; }
     }
     const ate = txs.filter(x => ymOf(x.data) <= ym), bal = balances(ate, cfg), h = totals(ate);
@@ -442,16 +452,50 @@ function dreAno(txs, ano, cfg) {
   return meses;
 }
 
+
+/* ---------- Fechamento de mês ---------- */
+function hashStr(s) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < s.length; i++) { const ch = s.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
+// Assinatura dos lançamentos do mês (sem o id, que muda quando linhas são inseridas na planilha)
+function assinaturaMes(txs, ym) {
+  const tx = monthTx(txs, ym);
+  const linhas = tx.map(t => [t.data, t.tipo, (Number(t.valor) || 0).toFixed(2), efeitos(t).map(e => e[0]).join('>'), t.cat || '', t.fonte || '', t.comp || '', t.nf ? 1 : 0].join('|')).sort();
+  const tt = totals(tx);
+  return { h: hashStr(linhas.join('\n')), n: linhas.length, receita: tt.receita, resultado: tt.resultado };
+}
+const mesFechado = (cfg, d) => !!cfg.fechadoAte && String(d).slice(0, 7) <= cfg.fechadoAte;
+const proxMes = ym => { const y = Number(ym.slice(0, 4)), m = Number(ym.slice(5, 7)); return m === 12 ? (y + 1) + '-01' : y + '-' + pad2(m + 1); };
+// Meses fechados cujos lançamentos mudaram depois do fechamento (por exemplo, edição direta na planilha)
+function mesesAlterados(txs, cfg) { return Object.keys(cfg.fechamentos || {}).sort().filter(ym => assinaturaMes(txs, ym).h !== cfg.fechamentos[ym].h); }
+// Fecha todos os meses até ym; devolve o novo estado de fechamento
+function fecharAte(txs, cfg, ym, em) {
+  const fs = { ...(cfg.fechamentos || {}) };
+  const primeiro = txs.map(t => ymOf(t.data)).sort()[0];
+  let m = cfg.fechadoAte ? proxMes(cfg.fechadoAte) : (primeiro && primeiro < ym ? primeiro : ym);
+  for (let i = 0; m <= ym && i < 600; i++, m = proxMes(m)) fs[m] = { ...assinaturaMes(txs, m), em };
+  return { fechadoAte: ym > (cfg.fechadoAte || '') ? ym : cfg.fechadoAte, fechamentos: fs };
+}
+function reabrirUltimo(cfg) {
+  const fs = { ...(cfg.fechamentos || {}) }; delete fs[cfg.fechadoAte];
+  const ant = Object.keys(fs).sort().filter(k => k < cfg.fechadoAte).pop() || '';
+  return { fechadoAte: ant, fechamentos: fs };
+}
+
 const brl = n => (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const pctf = n => (n * 100).toLocaleString('pt-BR', { maximumFractionDigits: 1 }) + '%';
 const MESES = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
 const MESES_L = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 const fmtData = d => { const [y, m, dd] = String(d).split('-'); return dd + '/' + m + '/' + y.slice(2); };
 const ymLabel = ym => MESES_L[Number(ym.slice(5, 7)) - 1] + ' de ' + ym.slice(0, 4);
-if (typeof module !== 'undefined') module.exports = { DEFAULT_CFG, mkCfg, efeitos, balances, totals, limiteMei, apuracao, serieAno, statusDas, rmrb, extratoConta, extratoCat, dreAno, r2, slug, DEF_CC, DEF_INV };
+if (typeof module !== 'undefined') module.exports = { isDasCat, assinaturaMes, mesesAlterados, fecharAte, reabrirUltimo, mesFechado, DEFAULT_CFG, mkCfg, efeitos, balances, totals, limiteMei, apuracao, serieAno, statusDas, rmrb, extratoConta, extratoCat, dreAno, r2, slug, DEF_CC, DEF_INV };
 /* ===== Estado e armazenamento ===== */
 const hojeISO = (() => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); })();
-const S = { cfg: mkCfg(), tx: [], ano: Number(hojeISO.slice(0, 4)), ym: hojeISO.slice(0, 7), tab: 'painel', example: true, filtro: 'todos', storage: 'local', rel: { sub: 'dre', conta: DEF_CC, per: 'mes', de: '', ate: '', kind: 'despesa', cat: 'todas', recBy: 'ativ' }, cf: null, catEdit: null, catPend: null };
+const S = { cfg: mkCfg(), tx: [], ano: Number(hojeISO.slice(0, 4)), ym: hojeISO.slice(0, 7), tab: 'painel', example: true, filtro: 'todos', storage: 'local', reabrirPend: false, rel: { sub: 'dre', conta: DEF_CC, per: 'mes', de: '', ate: '', kind: 'despesa', cat: 'todas', recBy: 'ativ' }, cf: null, catEdit: null, catPend: null };
 const newId = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 function exampleData(ano, mesAtual) {
@@ -531,8 +575,8 @@ const Store = {
     S.tx = S.tx.filter(x => x.id !== id);
     if (Store.mode === 'db') await Store.txCol.doc(id).delete(); else Store.localSave();
   },
-  async saveCfg() {
-    if (Store.mode === 'sheets') return Store.gWrite(() => GS.putCfg());
+  async saveCfg(tabs) {
+    if (Store.mode === 'sheets') return Store.gWrite(() => GS.putCfg(tabs));
     if (Store.mode === 'db') await Store.cfgRef.set({ ...JSON.parse(JSON.stringify(S.cfg)), exemplo: false }); else Store.localSave();
   },
   async start() { // sai do modo exemplo
@@ -576,6 +620,8 @@ const GS = {
   sheetId: null, gid: null, rows: new Map(), connected: false, busy: false, err: '', skipped: 0, skippedRows: [], last: 0, chain: Promise.resolve(),
   SCOPE: 'https://www.googleapis.com/auth/drive.file',
   NAME: 'Caixa MEI - Dados',
+  ABAS: { Contas: ['id', 'nome', 'tipo', 'saldo_inicial', 'ativa'], Categorias: ['tipo', 'nome', 'marcador'] },
+  avisos: [],
   HEAD: ['id', 'data', 'tipo', 'valor', 'atividade', 'categoria', 'nota_fiscal', 'competencia_das', 'descricao', 'atualizado_em', 'conta', 'conta_destino'],
 
   loadLib() {
@@ -625,18 +671,71 @@ const GS = {
       if (f.files && f.files.length) { id = f.files[0].id; meta = await GS.api(SH + '/' + id + '?fields=sheets.properties'); }
     }
     if (!id) {
-      meta = await GS.api(SH, { method: 'POST', body: JSON.stringify({ properties: { title: GS.NAME, locale: 'pt_BR' }, sheets: [{ properties: { title: 'Lancamentos' } }, { properties: { title: 'Config' } }] }) });
+      meta = await GS.api(SH, { method: 'POST', body: JSON.stringify({ properties: { title: GS.NAME, locale: 'pt_BR' }, sheets: [{ properties: { title: 'Lancamentos' } }, { properties: { title: 'Config' } }, { properties: { title: 'Contas' } }, { properties: { title: 'Categorias' } }] }) });
       id = meta.spreadsheetId;
       await GS.api(SH + '/' + id + '/values/' + encodeURIComponent('Lancamentos!A1:L1') + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [GS.HEAD] }) });
+      await GS.cabecalhos(id, Object.keys(GS.ABAS));
     } else {
       // planilhas criadas por versões antigas: acrescenta as colunas conta e conta_destino ao cabeçalho
       const h = await GS.api(SH + '/' + id + '/values/' + encodeURIComponent('Lancamentos!A1:L1'));
       const l1 = (h && h.values && h.values[0]) || [];
       if (l1[10] !== 'conta' || l1[11] !== 'conta_destino') await GS.api(SH + '/' + id + '/values/' + encodeURIComponent('Lancamentos!A1:L1') + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [GS.HEAD] }) });
     }
+    // planilhas de versões anteriores não têm as abas Contas e Categorias: cria agora
+    const titulos = new Set((meta.sheets || []).map(x => x.properties.title));
+    const faltam = Object.keys(GS.ABAS).filter(n => !titulos.has(n));
+    if (faltam.length) {
+      await GS.api(SH + '/' + id + ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests: faltam.map(title => ({ addSheet: { properties: { title } } })) }) });
+      await GS.cabecalhos(id, faltam);
+    }
     const aba = (meta.sheets || []).find(s => s.properties.title === 'Lancamentos');
     if (!aba) throw new Error('A planilha não tem a aba "Lancamentos".');
     GS.sheetId = id; GS.gid = aba.properties.sheetId; lsSet('caixa-mei-sheet-id', id);
+  },
+
+  async cabecalhos(id, nomes) {
+    await GS.api(SH + '/' + id + '/values:batchUpdate', { method: 'POST', body: JSON.stringify({ valueInputOption: 'RAW', data: nomes.map(n => ({ range: n + '!A1:' + String.fromCharCode(64 + GS.ABAS[n].length) + '1', values: [GS.ABAS[n]] })) }) });
+  },
+  norm: x => String(x == null ? '' : x).normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase(),
+  // lê a aba Contas (tolerante: nome ou id, tipo por extenso, ativa sim ou não)
+  parseContas(rows) {
+    const lista = [], av = [], ids = new Set();
+    rows.forEach((r, i) => {
+      if (!r || r.every(v => v === '' || v == null)) return;
+      const nome = String(r[1] == null || r[1] === '' ? (r[0] || '') : r[1]).trim(), id = slug(r[0]) || slug(nome);
+      const s0 = typeof r[3] === 'number' ? r[3] : parseNum(r[3] === undefined || r[3] === '' ? '0' : r[3]);
+      if (!id || !nome) { av.push('Contas, linha ' + (i + 2) + ': sem nome'); return; }
+      if (!isFinite(s0)) { av.push('Contas, linha ' + (i + 2) + ': saldo inicial inválido'); return; }
+      if (ids.has(id)) { av.push('Contas, linha ' + (i + 2) + ': id repetido (' + id + ')'); return; }
+      ids.add(id);
+      const t = GS.norm(r[2]);
+      lista.push({ id, nome, tipo: t.startsWith('aplic') ? 'aplicacao' : /esp|dinheiro|caixa/.test(t) ? 'especie' : 'corrente', saldo0: s0, ativa: !['nao', 'n', 'false', '0', 'inativa', 'arquivada'].includes(GS.norm(r[4])) });
+    });
+    return { lista, av };
+  },
+  parseCats(rows) {
+    const rec = [], desp = [], av = []; let das = null;
+    rows.forEach((r, i) => {
+      if (!r || r.every(v => v === '' || v == null)) return;
+      const t = GS.norm(r[0]), nome = String(r[1] || '').trim();
+      if (!nome) { av.push('Categorias, linha ' + (i + 2) + ': sem nome'); return; }
+      if (t.startsWith('rec')) rec.push(nome);
+      else if (t.startsWith('des')) { desp.push(nome); if (GS.norm(r[2]) === 'das') das = nome; }
+      else av.push('Categorias, linha ' + (i + 2) + ': tipo deve ser receita ou despesa');
+    });
+    return { rec, desp, das, av };
+  },
+  rowsContas: cfg => cfg.contas.map(c => [c.id, c.nome, c.tipo, c.saldo0, c.ativa ? 'sim' : 'não']),
+  rowsCats: cfg => cfg.catsRec.map(n => ['receita', n, '']).concat(cfg.catsDesp.map(n => ['despesa', n, isDasCat(n) ? 'das' : ''])),
+  async writeTab(nome, cfg) {
+    const head = GS.ABAS[nome], rows = nome === 'Contas' ? GS.rowsContas(cfg) : GS.rowsCats(cfg), col = String.fromCharCode(64 + head.length);
+    await GS.api(SH + '/' + GS.sheetId + '/values:batchClear', { method: 'POST', body: JSON.stringify({ ranges: [nome + '!A2:' + col] }) });
+    await GS.api(SH + '/' + GS.sheetId + '/values/' + encodeURIComponent(nome + '!A1:' + col + (rows.length + 1)) + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [head].concat(rows) }) });
+  },
+  // abas vazias (ou sem as contas padrão) são preenchidas com o que o app já conhece
+  async seed(d) {
+    if (d.seed.contas) await GS.writeTab('Contas', S.cfg);
+    if (d.seed.cats) await GS.writeTab('Categorias', S.cfg);
   },
 
   toRow(t) { return [t.id, t.data, t.tipo, Number(t.valor), t.fonte || '', t.cat || '', t.tipo === 'receita' ? (t.nf ? 'sim' : 'não') : '', t.comp || '', t.desc || '', new Date().toISOString(), t.conta || '', t.destino || '']; },
@@ -658,10 +757,10 @@ const GS = {
     if (tipo === 'receita') { if (!fonte || fonte === 'ger') return null; o.fonte = fonte; o.nf = ['sim', 's', 'yes', 'true', '1'].includes(norm(r[6])); }
     if (tipo === 'despesa') {
       o.fonte = fonte || 'ger';
-      o.cat = cfg.catsDesp.find(c => norm(c) === norm(r[5])) || (r[5] ? String(r[5]).trim() : 'Outras despesas');
+      o.cat = isDasCat(r[5]) ? cfg.dasCat : cfg.catsDesp.find(c => norm(c) === norm(r[5])) || (r[5] ? String(r[5]).trim() : 'Outras despesas');
       let comp = typeof r[7] === 'number' ? iso(r[7]).slice(0, 7) : String(r[7] || '').trim(); const mc = /^(\d{1,2})\/(\d{4})$/.exec(comp);
       if (mc) comp = mc[2] + '-' + mc[1].padStart(2, '0');
-      if (!/^\d{4}-\d{2}/.test(comp) && o.cat === 'DAS MEI') { const d = new Date(o.data + 'T12:00:00'); d.setMonth(d.getMonth() - 1); comp = d.toISOString().slice(0, 7); }
+      if (!/^\d{4}-\d{2}/.test(comp) && isDasCat(o.cat)) { const d = new Date(o.data + 'T12:00:00'); d.setMonth(d.getMonth() - 1); comp = d.toISOString().slice(0, 7); }
       if (/^\d{4}-\d{2}/.test(comp)) o.comp = comp.slice(0, 7);
     }
     if (tipo === 'receita' && r[5]) o.cat = cfg.catsRec.find(c => norm(c) === norm(r[5])) || String(r[5]).trim();
@@ -677,11 +776,23 @@ const GS = {
     return o;
   },
   async loadAll() {
-    const u = SH + '/' + GS.sheetId + '/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&ranges=' + encodeURIComponent('Lancamentos!A2:L') + '&ranges=' + encodeURIComponent('Config!A1:B1');
+    const rg = n => '&ranges=' + encodeURIComponent(n);
+    const u = SH + '/' + GS.sheetId + '/values:batchGet?valueRenderOption=UNFORMATTED_VALUE' + rg('Lancamentos!A2:L') + rg('Config!A1:B1') + rg('Contas!A2:E') + rg('Categorias!A2:C');
     const r = await GS.api(u);
     const vr = r.valueRanges || [], rows = (vr[0] && vr[0].values) || [], c = vr[1] && vr[1].values && vr[1].values[0];
     let cfg = null; try { cfg = c && c[1] ? JSON.parse(c[1]) : null; } catch (e) { cfg = null; }
-    const cfgN = mkCfg(cfg);
+    const ct = GS.parseContas((vr[2] && vr[2].values) || []), cg = GS.parseCats((vr[3] && vr[3].values) || []);
+    const base = { ...(cfg || {}) };
+    if (ct.lista.length) base.contas = ct.lista;
+    if (cg.rec.length) base.catsRec = cg.rec;
+    if (cg.desp.length) base.catsDesp = cg.desp;
+    if (cg.das) base.dasCat = cg.das;
+    const cfgN = mkCfg(base);
+    GS.avisos = ct.av.concat(cg.av);
+    const seed = {
+      contas: !ct.lista.some(x => x.id === DEF_CC) || !ct.lista.some(x => x.id === DEF_INV),
+      cats: !cg.rec.length || !cg.desp.length || !cg.desp.some(isDasCat)
+    };
     GS.rows.clear(); GS.skipped = 0; GS.skippedRows = []; const tx = [], vistos = new Set();
     rows.forEach((row, i) => {
       if (!row || row.every(v => v === '' || v == null)) return;
@@ -689,7 +800,7 @@ const GS = {
       if (t && !vistos.has(t.id)) { vistos.add(t.id); tx.push(t); GS.rows.set(t.id, i + 2); } else { GS.skipped++; GS.skippedRows.push(i + 2); }
     });
     GS.last = Date.now();
-    return { tx, cfg };
+    return { tx, cfg, cfgObj: base, seed };
   },
   async put(t) {
     const row = GS.rows.get(t.id);
@@ -711,8 +822,11 @@ const GS = {
     await GS.api(SH + '/' + GS.sheetId + ':batchUpdate', { method: 'POST', body: JSON.stringify({ requests: [{ deleteDimension: { range: { sheetId: GS.gid, dimension: 'ROWS', startIndex: row - 1, endIndex: row } } }] }) });
     GS.rows.delete(id); for (const [k, v] of GS.rows) if (v > row) GS.rows.set(k, v - 1);
   },
-  async putCfg() {
-    await GS.api(SH + '/' + GS.sheetId + '/values/' + encodeURIComponent('Config!A1:B1') + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [['config_json', JSON.stringify(S.cfg)]] }) });
+  // contas e categorias moram nas abas próprias; o resto dos ajustes fica na aba Config
+  async putCfg(tabs) {
+    const { contas, catsRec, catsDesp, ...resto } = S.cfg;
+    await GS.api(SH + '/' + GS.sheetId + '/values/' + encodeURIComponent('Config!A1:B1') + '?valueInputOption=RAW', { method: 'PUT', body: JSON.stringify({ values: [['config_json', JSON.stringify(resto)]] }) });
+    if (tabs) { await GS.writeTab('Contas', S.cfg); await GS.writeTab('Categorias', S.cfg); }
   }
 };
 
@@ -729,17 +843,18 @@ Object.assign(Store, {
   async gConnect(interativo) {
     await GS.auth(interativo ? '' : 'none');
     await GS.ensureSheet();
-    Store.gApply(await GS.loadAll());
+    const d = await GS.loadAll();
+    Store.gApply(d); await GS.seed(d);
     GS.connected = true; lsSet('caixa-mei-gs', '1');
   },
   gApply(d) {
     Store.gotCfg = Store.gotTx = true; Store.cfgExists = !!d.cfg; Store.txCount = d.tx.length;
-    if (d.cfg) S.cfg = mkCfg(d.cfg);
+    S.cfg = mkCfg(d.cfgObj);
     S.tx = d.tx; Store.decide();
   },
   async gRefresh() {
     if (!GS.connected) return;
-    try { Store.gApply(await GS.loadAll()); if (Store.onChange) Store.onChange(); } catch (e) { /* tenta de novo no próximo foco */ }
+    try { const d = await GS.loadAll(); Store.gApply(d); await GS.seed(d); if (Store.onChange) Store.onChange(); } catch (e) { /* tenta de novo no próximo foco */ }
   },
   gDisconnect() {
     try { if (GS.token && window.google) google.accounts.oauth2.revoke(GS.token, () => {}); } catch (e) { /* ignora */ }
@@ -797,6 +912,8 @@ function alertas(ap, lim, das) {
   else if (lim.nivel === 'excesso') a.push(['bad', `Faturamento acima do limite de ${brl(lim.limite)}. Dentro de 20% você continua MEI neste ano, paga DAS complementar sobre o excesso e migra para ME em janeiro.`]);
   else if (lim.nivel === 'atencao') a.push(['warn', `Você já usou ${pctf(lim.pct)} do limite anual. No ritmo atual, fecha o ano em ${brl(lim.projecao)}.`]);
   else if (lim.projecao > lim.limite) a.push(['warn', `Hoje você está dentro do limite, mas a projeção do ano é ${brl(lim.projecao)}, acima de ${brl(lim.limite)}.`]);
+  const alt = mesesAlterados(S.tx, S.cfg);
+  if (alt.length) a.push(['bad', `Mês fechado alterado depois do fechamento: ${alt.map(ym => ymLabel(ym)).join(', ')}. Se foi você, reabra o mês em Apuração e feche de novo. Se não foi, confira o Histórico de versões da planilha.`]);
   const atras = das.filter(d => d.st === 'atrasado');
   if (atras.length) a.push(['bad', `DAS em atraso: ${atras.map(d => MESES[Number(d.comp.slice(5)) - 1]).join(', ')}. Multa de 0,33% ao dia (máximo 20%) mais juros.`]);
   if (ap.prejuizoYtd && S.tx.length) a.push(['warn', 'Não há lucro acumulado disponível para transferir. Retirar agora seria devolver capital, não distribuir lucro.']);
@@ -869,7 +986,7 @@ function txRow(t) {
   if (t.tipo === 'receita' || t.tipo === 'despesa') pills.push(`<span class="pill"><i class="dot" style="background:${fonteCor(t.fonte)};margin-right:4px"></i>${esc(fonteNome(t.fonte))}</span>`);
   if (t.tipo === 'despesa') pills.push(`<span class="pill">${esc(t.cat || 'Outras despesas')}</span>`);
   if (t.tipo === 'receita' && t.cat) pills.push(`<span class="pill">${esc(t.cat)}</span>`);
-  if (t.cat === 'DAS MEI' && t.comp) pills.push(`<span class="pill info">competência ${esc(t.comp.slice(5))}/${esc(t.comp.slice(0, 4))}</span>`);
+  if (isDasCat(t.cat) && t.comp) pills.push(`<span class="pill info">competência ${esc(t.comp.slice(5))}/${esc(t.comp.slice(0, 4))}</span>`);
   if (t.tipo === 'receita') pills.push(t.nf ? '<span class="pill ok">com nota</span>' : '<span class="pill warn">sem nota</span>');
   if (t.tipo !== 'receita' && t.tipo !== 'despesa') pills.push(`<span class="pill info">${esc(k.nome)}</span>`);
   if (mov) { const [[o], [d]] = efeitos(t); pills.push(`<span class="pill">${esc(contaNomeDe(S.cfg, o))} → ${esc(contaNomeDe(S.cfg, d))}</span>`); }
@@ -902,15 +1019,32 @@ function viewLanc() {
     <div class="list">${lista.length ? lista.map(txRow).join('') : `<p class="muted" style="padding:18px 0">Nenhum lançamento em ${esc(ymLabel(S.ym))}${S.filtro !== 'todos' ? ' neste filtro' : ''}. Toque em <b>+ Lançar</b> para registrar.</p>`}</div></div>`;
 }
 
+function viewFechamento() {
+  const c = S.cfg, ym = S.ym, fe = c.fechadoAte, f = c.fechamentos[ym];
+  const aberto = !fe || ym > fe, futuro = ym > hojeISO.slice(0, 7);
+  const alterado = f && mesesAlterados(S.tx, c).includes(ym);
+  let corpo;
+  if (!aberto && ym < fe) corpo = `<p class="small">Este mês está fechado, junto com todos até ${esc(ymLabel(fe))}. Para reabrir, comece pelo mais recente.</p>`;
+  else if (!aberto) corpo = `<p class="small">Fechado${f && f.em ? ' em ' + esc(fmtData(f.em)) : ''}: receitas de <b class="num">${brl(f ? f.receita : 0)}</b> e resultado de <b class="num">${brl(f ? f.resultado : 0)}</b> no momento do fechamento. Lançamentos deste mês e dos anteriores não podem ser criados, editados nem excluídos pelo app.</p>
+    <div style="margin-top:10px">${S.reabrirPend ? '<button class="btn sm" data-act="reabrirOk">Confirmar reabertura</button> <button class="btn sm alt" data-act="reabrirCancel">Cancelar</button>' : '<button class="btn sm alt" data-act="reabrir">Reabrir este mês</button>'}</div>`;
+  else if (futuro) corpo = '<p class="small muted">Só dá para fechar um mês que já começou.</p>';
+  else {
+    const extra = []; for (let m = fe ? proxMes(fe) : null; m && m < ym; m = proxMes(m)) extra.push(m);
+    corpo = `<p class="small">Fechar trava os lançamentos deste mês${extra.length ? ' e dos ' + extra.length + ' mês(es) anterior(es) ainda abertos' : ''} no app e guarda uma assinatura dos números. Antes de fechar, confira os saldos das contas com o extrato (aba Contas) e registre as transferências para você.</p>
+    <div style="margin-top:10px"><button class="btn sm" data-act="fechar">Fechar ${esc(ymLabel(ym))}</button></div>`;
+  }
+  return `<div class="card"><h3>Fechamento do mês <span class="pill ${aberto ? '' : alterado ? 'bad' : 'ok'}" style="margin-left:6px">${aberto ? 'aberto' : alterado ? 'alterado' : 'fechado'}</span></h3>${alterado ? '<div class="alert bad" style="margin-bottom:8px">Os lançamentos deste mês mudaram depois do fechamento, provavelmente por edição direta na planilha.</div>' : ''}${corpo}</div>`;
+}
+
 function viewApur() {
   const ap = apuracao(S.tx, S.ym, S.cfg);
   const m = ap.mes, c = S.cfg;
   const porFonte = c.fontes.map(f => {
     const rec = m.porFonte[f.id] || 0;
-    const desp = sumTx(monthTx(S.tx, S.ym), t => t.tipo === 'despesa' && t.fonte === f.id && t.cat !== 'DAS MEI');
+    const desp = sumTx(monthTx(S.tx, S.ym), t => t.tipo === 'despesa' && t.fonte === f.id && !isDasCat(t.cat));
     return { f, rec, desp, res: r2(rec - desp) };
   });
-  const geral = sumTx(monthTx(S.tx, S.ym), t => t.tipo === 'despesa' && t.fonte === 'ger' && t.cat !== 'DAS MEI');
+  const geral = sumTx(monthTx(S.tx, S.ym), t => t.tipo === 'despesa' && t.fonte === 'ger' && !isDasCat(t.cat));
   const falta = r2(ap.faltaIsento + ap.faltaTrib);
   const aviso = [];
   if (ap.limitadoTeto) aviso.push(`O plano de isento (${brl(ap.planejado)}) passaria do teto do ano. A sugestão foi limitada ao que ainda cabe.`);
@@ -955,6 +1089,7 @@ function viewApur() {
       ${porFonte.map(x => `<tr><td><i class="dot" style="background:${x.f.cor}"></i>${esc(x.f.nome)}</td><td class="r">${brl(x.rec)}</td><td class="r">${brl(x.desp)}</td><td class="r ${x.res < 0 ? 'neg' : ''}">${brl(x.res)}</td><td class="r">${x.rec ? pctf(x.res / x.rec) : '–'}</td></tr>`).join('')}
       <tr class="sum"><td>Despesas gerais e DAS</td><td class="r"></td><td class="r">${brl(r2(geral + m.das))}</td><td class="r"></td><td class="r"></td></tr>
     </tbody></table></div></div>
+  ${viewFechamento()}
   <div class="card flat"><details><summary>Como funciona e onde está o risco</summary>
     <div style="display:grid;gap:8px;margin-top:10px" class="small">
       <p><b>Isento tem teto.</b> Sem contabilidade formal, só é isento o lucro presumido de ${c.presuncao}% da receita de serviços${c.descontaDas ? ', menos o DAS pago' : ''}. O que passar disso é rendimento tributável na sua pessoa física. Com contador e escrituração regular, o lucro real apurado pode ser distribuído isento, o que muda o jogo se sua margem for maior que ${c.presuncao}%.</p>
@@ -999,7 +1134,7 @@ function viewObrig() {
     </div>
     <p class="small muted" style="margin-top:8px">Até 20% acima do limite, você segue MEI no ano, paga DAS complementar sobre o excesso e vira ME em janeiro. Acima de 20%, o desenquadramento é retroativo ao mês do estouro. Existem projetos no Congresso para subir o teto, mas o valor em vigor continua sendo ${brl(S.cfg.limite)}.</p></div>
   <div class="card"><h2>DAS mensal</h2>
-    <p class="small muted" style="margin-bottom:10px">Vence todo dia 20 do mês seguinte. Para constar aqui, registre o pagamento como despesa na categoria <b>DAS MEI</b>, informando a competência. Valor padrão: ${brl(S.cfg.das)}.</p>
+    <p class="small muted" style="margin-bottom:10px">Vence todo dia 20 do mês seguinte. Para constar aqui, registre o pagamento como despesa na categoria <b>${esc(S.cfg.dasCat)}</b>, informando a competência. Valor padrão: ${brl(S.cfg.das)}.</p>
     <div class="months">${das.map(d => { const [c, n] = DAS_ST[d.st]; return `<div class="mcell"><b>${MESES[Number(d.comp.slice(5)) - 1]}</b><span class="pill ${c}">${n}</span><span class="muted">vence ${fmtData(d.venc).slice(0, 5)}</span></div>`; }).join('')}</div></div>
   <div class="card"><h2>Declaração anual (DASN-SIMEI)</h2>
     <p>Faturamento de ${S.ano} para declarar: <b class="num">${brl(tAno.receita)}</b>, sendo ${brl(tAno.comNF)} com nota e ${brl(tAno.semNF)} sem nota. Prazo: <b>31/05/${S.ano + 1}</b>${`${S.ano + 1}-05-31` < hojeISO ? '. <b class="neg">O prazo já passou.</b> Se ainda não entregou, entregue o quanto antes: há multa por atraso, e ela cresce a cada mês' : ''}.</p>
@@ -1017,7 +1152,7 @@ const fld = (id, label, val, attrs) => `<div class="field"><label for="${id}">${
 function catBloco(kind, titulo, lista) {
   const uso = n => S.tx.filter(t => t.tipo === kind && (t.cat || (kind === 'receita' ? 'Sem categoria' : 'Outras despesas')) === n).length;
   const linhas = lista.map(n => {
-    const fixa = n === 'DAS MEI', key = kind + '|' + n, ed = S.catEdit && S.catEdit.key === key, conf = S.catPend === key, u = uso(n);
+    const fixa = isDasCat(n), key = kind + '|' + n, ed = S.catEdit && S.catEdit.key === key, conf = S.catPend === key, u = uso(n);
     if (ed) return `<div class="step" style="align-items:center;gap:8px"><input id="cat_novo" value="${esc(n)}" style="flex:1;min-width:0;background:var(--surface2);border:1px solid var(--line);border-radius:8px;padding:7px"><span><button class="link" data-act="catRenOk" data-kind="${kind}" data-nome="${esc(n)}">Salvar</button><button class="link" data-act="catRenCancel">Cancelar</button></span></div>`;
     return `<div class="step" style="align-items:center"><span>${esc(n)}${fixa ? ' <span class="pill">fixa</span>' : ''}${u ? ` <span class="small muted">${u} lanç.</span>` : ''}</span><span>${fixa ? '' : `<button class="link" data-act="catRen" data-kind="${kind}" data-nome="${esc(n)}">Renomear</button><button class="link danger" data-act="${conf ? 'catDelOk' : 'catDel'}" data-kind="${kind}" data-nome="${esc(n)}">${conf ? 'Confirmar' : 'Remover'}</button>`}</span></div>`;
   }).join('');
@@ -1053,7 +1188,7 @@ function viewAjustes() {
     <label class="btn sm alt" style="display:inline-flex;align-items:center;cursor:pointer" for="impFile">Importar backup</label><input id="impFile" type="file" accept=".json,application/json" hidden></div></div>`;
 }
 
-const sheetsBox = () => `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><a class="btn sm" style="text-decoration:none;display:inline-flex;align-items:center" href="https://docs.google.com/spreadsheets/d/${esc(GS.sheetId)}" target="_blank" rel="noopener">Abrir planilha</a><button class="btn sm alt" data-act="grefresh">Atualizar da planilha</button><button class="btn sm alt" data-act="gdisc">Desconectar neste aparelho</button></div>${GS.skipped ? `<div class="alert warn" style="margin-bottom:10px">${GS.skipped} linha(s) da planilha foram ignoradas: <b>${GS.skippedRows.slice(0, 40).join(', ')}${GS.skippedRows.length > 40 ? '...' : ''}</b>. Motivos comuns: tipo fora da lista, data ou valor inválidos, receita sem atividade (com ou pat), conta desconhecida ou id repetido. Elas continuam na planilha, mas não entram nos cálculos.</div>` : ''}`;
+const sheetsBox = () => `<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px"><a class="btn sm" style="text-decoration:none;display:inline-flex;align-items:center" href="https://docs.google.com/spreadsheets/d/${esc(GS.sheetId)}" target="_blank" rel="noopener">Abrir planilha</a><button class="btn sm alt" data-act="grefresh">Atualizar da planilha</button><button class="btn sm alt" data-act="gdisc">Desconectar neste aparelho</button></div>${GS.avisos && GS.avisos.length ? `<div class="alert warn" style="margin-bottom:10px">Avisos nas abas Contas e Categorias: ${esc(GS.avisos.slice(0, 6).join('; '))}. Essas linhas foram ignoradas.</div>` : ''}${GS.skipped ? `<div class="alert warn" style="margin-bottom:10px">${GS.skipped} linha(s) da planilha foram ignoradas: <b>${GS.skippedRows.slice(0, 40).join(', ')}${GS.skippedRows.length > 40 ? '...' : ''}</b>. Motivos comuns: tipo fora da lista, data ou valor inválidos, receita sem atividade (com ou pat), conta desconhecida ou id repetido. Elas continuam na planilha, mas não entram nos cálculos.</div>` : ''}`;
 const viewConectar = () => `<div class="card hi" style="max-width:520px;margin-inline:auto"><h2>Conectar ao Google Sheets</h2><p style="margin:8px 0 12px">Seus lançamentos ficam numa planilha do seu Google Drive chamada <b>${esc(GS.NAME)}</b>. Na primeira vez, o app cria a planilha e o Google pede sua permissão. O app só enxerga a planilha que ele mesmo criou.</p>${GS.err ? `<div class="alert bad" style="margin-bottom:12px">${esc(GS.err)}</div>` : ''}<button class="btn" data-act="gconnect" ${GS.busy || !GS.libOk ? 'disabled' : ''}>${GS.busy ? 'Conectando...' : 'Conectar ao Google'}</button><p class="small muted" style="margin-top:10px">Ao abrir o app, pode ser preciso tocar em Conectar de novo. É um clique, o Google lembra a permissão.</p></div>`;
 /* ===== Telas: contas e relatórios (demonstrativo anual, extratos) ===== */
 const numBr = n => (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -1123,8 +1258,8 @@ const cabImpr = titulo => `<div class="printonly" style="margin-bottom:10px"><h2
 
 function viewRel() {
   const sub = S.rel.sub;
-  return `<div class="card noprint"><div class="seg" role="radiogroup" aria-label="Tipo de relatório">${[['dre', 'Resultado do ano'], ['conta', 'Extrato de conta'], ['cat', 'Receitas e despesas']].map(([k, n]) => `<label><input type="radio" name="relsub" value="${k}" data-rel="sub" ${sub === k ? 'checked' : ''}><span>${n}</span></label>`).join('')}</div></div>`
-    + (sub === 'conta' ? viewExtConta() : sub === 'cat' ? viewExtCat() : viewDre());
+  return `<div class="card noprint"><div class="seg" role="radiogroup" aria-label="Tipo de relatório">${[['dre', 'Resultado do ano'], ['conta', 'Extrato de conta'], ['cat', 'Receitas e despesas'], ['plano', 'Categorias e contas']].map(([k, n]) => `<label><input type="radio" name="relsub" value="${k}" data-rel="sub" ${sub === k ? 'checked' : ''}><span>${n}</span></label>`).join('')}</div></div>`
+    + (sub === 'conta' ? viewExtConta() : sub === 'cat' ? viewExtCat() : sub === 'plano' ? viewPlano() : viewDre());
 }
 
 /* Demonstrativo anual: uma coluna por mês */
@@ -1248,8 +1383,43 @@ function extCatCsv() {
   l.push(';;;;Total;' + csvNum(ec.total));
   return l.join('\n');
 }
-const relCsv = () => S.rel.sub === 'conta' ? extContaCsv() : S.rel.sub === 'cat' ? extCatCsv() : dreCsv();
-const relNomeArq = () => S.rel.sub === 'conta' ? 'extrato-' + slug(contaNome(S.rel.conta)) + '.csv' : S.rel.sub === 'cat' ? (S.rel.kind === 'receita' ? 'receitas' : 'despesas') + '-por-categoria.csv' : 'resultado-' + S.ano + '.csv';
+const relCsv = () => S.rel.sub === 'conta' ? extContaCsv() : S.rel.sub === 'cat' ? extCatCsv() : S.rel.sub === 'plano' ? planoCsv() : dreCsv();
+const relNomeArq = () => S.rel.sub === 'conta' ? 'extrato-' + slug(contaNome(S.rel.conta)) + '.csv' : S.rel.sub === 'cat' ? (S.rel.kind === 'receita' ? 'receitas' : 'despesas') + '-por-categoria.csv' : S.rel.sub === 'plano' ? 'categorias-' + S.ano + '.csv' : 'resultado-' + S.ano + '.csv';
+
+/* Categorias (receita e despesa) e contas financeiras, com totais do ano */
+function planoDados() {
+  const ano = S.ano, hojeAno = Number(hojeISO.slice(0, 4));
+  const blocos = [['receita', 'Receitas', S.cfg.catsRec], ['despesa', 'Despesas', S.cfg.catsDesp]].map(([kind, titulo, lista]) => {
+    const uso = {};
+    S.tx.filter(t => t.tipo === kind && yOf(t.data) === ano).forEach(t => { const k = t.cat || (kind === 'receita' ? 'Sem categoria' : 'Outras despesas'); const u = uso[k] = uso[k] || { n: 0, total: 0 }; u.n++; u.total += Number(t.valor) || 0; });
+    const nomes = lista.concat(Object.keys(uso).filter(k => !lista.includes(k)));
+    const total = r2(Object.values(uso).reduce((x, u) => x + u.total, 0));
+    return { kind, titulo, total, linhas: nomes.map(k => { const u = uso[k] || { n: 0, total: 0 }; return { nome: k, n: u.n, total: r2(u.total), fora: !lista.includes(k), pct: total ? u.total / total : 0 }; }) };
+  });
+  const data = ano === hojeAno ? hojeISO : ano + '-12-31';
+  const bal = balances(S.tx.filter(t => t.data <= data), S.cfg);
+  return { blocos, data, bal };
+}
+function viewPlano() {
+  const { blocos, data, bal } = planoDados();
+  const tabela = b => `<h3 style="margin:14px 0 6px">${b.titulo}</h3><div class="scroll"><table class="tbl"><thead><tr><th>Categoria</th><th class="r">Lanç.</th><th class="r">Total ${S.ano}</th><th class="r">%</th></tr></thead><tbody>
+    ${b.linhas.map(l => `<tr><td>${esc(l.nome)}${isDasCat(l.nome) ? ' <span class="pill">fixa</span>' : ''}${l.fora && l.nome !== 'Sem categoria' ? ` <span class="pill warn">fora da lista</span> <button class="link" data-act="catInc" data-kind="${b.kind}" data-nome="${esc(l.nome)}">Incluir</button>` : ''}${l.nome === 'Sem categoria' ? ' <span class="pill warn">sem categoria</span>' : ''}</td><td class="r">${l.n || '–'}</td><td class="r">${l.total ? numBr(l.total) : '–'}</td><td class="r">${l.total ? pctf(l.pct) : '–'}</td></tr>`).join('')}
+    <tr class="sum"><td>Total</td><td class="r">${b.linhas.reduce((x, l) => x + l.n, 0)}</td><td class="r">${numBr(b.total)}</td><td class="r"></td></tr></tbody></table></div>`;
+  return `<div class="card">${cabImpr('Categorias e contas · ' + S.ano)}
+    <h2>Categorias e contas</h2>
+    <p class="small muted noprint" style="margin:4px 0 0">Categorias que aparecem em lançamentos mas não estão na lista ficam marcadas e podem ser incluídas com um toque. Para criar, renomear ou remover, use <button class="link" data-act="tab" data-v="ajustes">Ajustes</button>.</p>
+    <h3 style="margin:14px 0 6px">Contas financeiras em ${esc(fmtData(data))}</h3>
+    <div class="scroll"><table class="tbl"><thead><tr><th>Conta</th><th>Tipo</th><th class="r">Saldo inicial</th><th class="r">Saldo</th></tr></thead><tbody>
+      ${S.cfg.contas.filter(c => c.ativa || bal.por[c.id]).map(c => `<tr><td>${esc(c.nome)}${c.ativa ? '' : ' <span class="pill warn">arquivada</span>'}</td><td>${esc(TIPOS_CONTA[c.tipo])}</td><td class="r">${numBr(c.saldo0)}</td><td class="r">${numBr(bal.por[c.id] || 0)}</td></tr>`).join('')}
+      <tr class="sum"><td>Total</td><td></td><td class="r"></td><td class="r">${numBr(r2(bal.cc + bal.inv))}</td></tr></tbody></table></div>
+    ${blocos.map(tabela).join('')}${acoesRel()}</div>`;
+}
+function planoCsv() {
+  const { blocos } = planoDados();
+  const l = ['Tipo;Categoria;Lançamentos;Total ' + S.ano + ';% do tipo'];
+  blocos.forEach(b => b.linhas.forEach(x => l.push([b.titulo, csvTxt(x.nome), x.n, csvNum(x.total), csvNum(x.pct * 100)].join(';'))));
+  return l.join('\n');
+}
 /* ===== Interações e inicialização ===== */
 const HINTS = {
   receita: 'Dinheiro que entrou pelo seu trabalho. Conta no limite do MEI.',
@@ -1274,6 +1444,7 @@ function openStart() {
 }
 
 const ROLE = { receita: ['disp', 'Entrou na conta'], aporte: ['disp', 'Entrou na conta'], despesa: ['disp', 'Saiu da conta'], ret_isenta: ['disp', 'Saiu da conta'], ret_trib: ['disp', 'Saiu da conta'], rendimento: ['inv', 'Aplicação'], aplicacao: ['disp', 'Origem', 'inv'], resgate: ['inv', 'Origem', 'disp'], transf: ['todas', 'Origem', 'todas'] };
+const fechadoMsg = d => mesFechado(S.cfg, d) ? 'O mês de ' + ymLabel(ymOf(d)) + ' está fechado. Para alterar, reabra o mês na aba Apuração.' : '';
 const contasPara = (papel, atual) => S.cfg.contas.filter(c => (papel === 'inv' ? c.tipo === 'aplicacao' : papel === 'disp' ? c.tipo !== 'aplicacao' : true) && (c.ativa || c.id === atual));
 
 function openForm(t) {
@@ -1307,7 +1478,7 @@ function openForm(t) {
     const sel = $('#f_cat'), base = tp === 'receita' ? S.cfg.catsRec : S.cfg.catsDesp;
     const ops = (tp === 'receita' ? [''] : []).concat(base, prefer && !base.includes(prefer) ? [prefer] : []);
     sel.innerHTML = ops.map(k => `<option value="${esc(k)}">${k === '' ? '(sem categoria)' : esc(k)}</option>`).join('');
-    sel.value = prefer !== null && ops.includes(prefer) ? prefer : (tp === 'receita' ? (base[0] || '') : (base.find(k => k !== 'DAS MEI') || base[0]));
+    sel.value = prefer !== null && ops.includes(prefer) ? prefer : (tp === 'receita' ? (base[0] || '') : (base.find(k => !isDasCat(k)) || base[0]));
   };
   let primeira = true;
   const sync = () => {
@@ -1321,14 +1492,14 @@ function openForm(t) {
     fill($('#f_conta'), rl[0], primeira ? pConta : '');
     if (rl[2]) fill($('#f_dest'), rl[2], primeira ? pDest : '');
     if (tp === 'receita' || tp === 'despesa') fillCat(tp, primeira && edit ? (d.cat || '') : null);
-    $('#g_comp').hidden = !(tp === 'despesa' && $('#f_cat').value === 'DAS MEI');
+    $('#g_comp').hidden = !(tp === 'despesa' && isDasCat($('#f_cat').value));
     document.querySelectorAll('#f_fonte label').forEach(l => { l.hidden = tp === 'receita' && l.dataset.f === 'ger'; });
     if (tp === 'receita' && document.querySelector('input[name=fonte]:checked')?.value === 'ger') document.querySelector('input[name=fonte][value=com]').checked = true;
-    if (tp === 'despesa' && $('#f_cat').value === 'DAS MEI' && !$('#f_valor').value) $('#f_valor').value = String(S.cfg.das).replace('.', ',');
+    if (tp === 'despesa' && isDasCat($('#f_cat').value) && !$('#f_valor').value) $('#f_valor').value = String(S.cfg.das).replace('.', ',');
     primeira = false;
   };
   $('#f_tipo').addEventListener('change', sync);
-  $('#f_cat').addEventListener('change', () => { const tp = $('#f_tipo').value; $('#g_comp').hidden = !(tp === 'despesa' && $('#f_cat').value === 'DAS MEI'); if (!$('#g_comp').hidden && !$('#f_valor').value) $('#f_valor').value = String(S.cfg.das).replace('.', ','); });
+  $('#f_cat').addEventListener('change', () => { const tp = $('#f_tipo').value; $('#g_comp').hidden = !(tp === 'despesa' && isDasCat($('#f_cat').value)); if (!$('#g_comp').hidden && !$('#f_valor').value) $('#f_valor').value = String(S.cfg.das).replace('.', ','); });
   sync();
   $('#fTx').addEventListener('submit', async e => {
     e.preventDefault();
@@ -1336,6 +1507,8 @@ function openForm(t) {
     const err = m => { const p = $('#f_err'); p.textContent = m; p.hidden = false; };
     if (!(valor > 0)) return err('Informe um valor maior que zero.');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) return err('Informe a data do lançamento.');
+    const bloq = fechadoMsg(data) || (edit && fechadoMsg(t.data));
+    if (bloq) return err(bloq);
     const conta = $('#f_conta').value, destino = rl[2] ? $('#f_dest').value : '';
     if (!conta) return err(rl[0] === 'inv' ? 'Cadastre uma conta do tipo aplicação na aba Contas.' : 'Escolha a conta.');
     if (rl[2] && !destino) return err('Escolha a conta de destino. Se ela não existe, cadastre na aba Contas.');
@@ -1344,7 +1517,7 @@ function openForm(t) {
     if (rl[2]) o.destino = destino;
     if (tipo === 'receita' || tipo === 'despesa') o.fonte = document.querySelector('input[name=fonte]:checked')?.value || 'com';
     if (tipo === 'receita') { o.nf = $('#f_nf').checked; if ($('#f_cat').value) o.cat = $('#f_cat').value; }
-    if (tipo === 'despesa') { o.cat = $('#f_cat').value; if (o.cat === 'DAS MEI') { o.comp = $('#f_comp').value; if (!o.comp) return err('Informe a competência do DAS (o mês a que ele se refere).'); } }
+    if (tipo === 'despesa') { o.cat = $('#f_cat').value; if (isDasCat(o.cat)) { o.comp = $('#f_comp').value; if (!o.comp) return err('Informe a competência do DAS (o mês a que ele se refere).'); } }
     try { await Store.saveTx(o); } catch (x) { return err('Não foi possível salvar agora. Tente de novo.'); }
     S.ano = yOf(data); S.ym = ymOf(data); closeSheet(); render(); toast(edit ? 'Lançamento atualizado' : 'Lançamento salvo');
   });
@@ -1362,7 +1535,7 @@ async function saveFile(filename, data, label) {
 const txCsv = () => ['Data;Tipo;Atividade;Categoria;Valor;Nota fiscal;Competência DAS;Conta;Conta destino;Descrição'].concat([...S.tx].sort((a, b) => a.data.localeCompare(b.data)).map(t => [t.data, TIPOS[t.tipo].nome, t.fonte ? fonteNome(t.fonte) : '', t.cat || '', Number(t.valor).toFixed(2).replace('.', ','), t.tipo === 'receita' ? (t.nf ? 'sim' : 'não') : '', t.comp || '', contaNome(efeitos(t)[0][0]), efeitos(t)[1] ? contaNome(efeitos(t)[1][0]) : '', '"' + String(t.desc || '').replace(/"/g, '""') + '"'].join(';'))).join('\n');
 
 async function acaoConta(a, el) {
-  const salvar = async ok => { try { await Store.saveCfg(); render(); if (ok) toast(ok); } catch (x) { toast('Não foi possível salvar agora.'); } };
+  const salvar = async ok => { try { await Store.saveCfg(true); render(); if (ok) toast(ok); } catch (x) { toast('Não foi possível salvar agora.'); } };
   const cs = S.cfg.contas;
   if (a === 'ctSave') {
     for (const c of cs) {
@@ -1396,25 +1569,29 @@ async function acaoConta(a, el) {
 async function acaoCat(a, el) {
   const kind = el.dataset.kind, nome = el.dataset.nome, key = kind + '|' + nome;
   const campo = kind === 'receita' ? 'catsRec' : 'catsDesp', lista = S.cfg[campo];
-  const salvar = async ok => { try { await Store.saveCfg(); render(); if (ok) toast(ok); } catch (x) { toast('Não foi possível salvar agora.'); } };
-  if (a === 'catAdd') {
+  const salvar = async ok => { try { await Store.saveCfg(true); render(); if (ok) toast(ok); } catch (x) { toast('Não foi possível salvar agora.'); } };
+  if (a === 'catInc') {
+    if (!lista.some(x => slug(x) === slug(nome))) lista.push(nome);
+    await salvar('Categoria incluída na lista');
+  } else if (a === 'catAdd') {
     const n = ($('#catadd_' + kind).value || '').trim();
     if (!n) { toast('Digite o nome da categoria.'); return; }
     if (lista.some(x => slug(x) === slug(n))) { toast('Essa categoria já existe.'); return; }
     lista.push(n); await salvar('Categoria adicionada');
   } else if (a === 'catDel') { S.catPend = key; render(); }
   else if (a === 'catDelOk') {
-    if (nome === 'DAS MEI') return;
+    if (isDasCat(nome)) return;
     S.cfg[campo] = lista.filter(x => x !== nome); S.catPend = null; await salvar('Categoria removida da lista');
   } else if (a === 'catRen') { S.catEdit = { key }; render(); const i = $('#cat_novo'); if (i) { i.focus(); i.select(); } }
   else if (a === 'catRenCancel') { S.catEdit = null; render(); }
   else if (a === 'catRenOk') {
     const novo = ($('#cat_novo').value || '').trim(); S.catEdit = null;
-    if (!novo || novo === nome || nome === 'DAS MEI') { render(); return; }
+    if (!novo || novo === nome || isDasCat(nome)) { render(); return; }
     const mudou = S.tx.filter(t => t.tipo === kind && t.cat === nome).map(t => ({ ...t, cat: novo }));
+    if (mudou.some(t => mesFechado(S.cfg, t.data))) { toast('Há lançamentos dessa categoria em meses fechados. Reabra os meses antes de renomear.'); render(); return; }
     const dup = lista.some(x => x !== nome && slug(x) === slug(novo));
     S.cfg[campo] = dup ? lista.filter(x => x !== nome) : lista.map(x => x === nome ? novo : x);
-    try { if (mudou.length) await Store.saveMany(mudou); await Store.saveCfg(); render(); toast(mudou.length ? 'Categoria renomeada em ' + mudou.length + ' lançamento(s)' : 'Categoria renomeada'); } catch (x) { toast('Não foi possível salvar agora.'); render(); }
+    try { if (mudou.length) await Store.saveMany(mudou); await Store.saveCfg(true); render(); toast(mudou.length ? 'Categoria renomeada em ' + mudou.length + ' lançamento(s)' : 'Categoria renomeada'); } catch (x) { toast('Não foi possível salvar agora.'); render(); }
   }
 }
 
@@ -1432,7 +1609,7 @@ document.addEventListener('click', async e => {
   }
   else if (a === 'edit') openForm(S.tx.find(t => t.id === el.dataset.id));
   else if (a === 'del') { delPend = el.dataset.id; render(); }
-  else if (a === 'delok') { try { await Store.delTx(el.dataset.id); toast('Lançamento excluído'); } catch (x) { toast('Não foi possível excluir agora.'); } delPend = null; render(); }
+  else if (a === 'delok') { const tx0 = S.tx.find(t => t.id === el.dataset.id); const bq = tx0 && fechadoMsg(tx0.data); if (bq) { toast(bq); delPend = null; render(); return; } try { await Store.delTx(el.dataset.id); toast('Lançamento excluído'); } catch (x) { toast('Não foi possível excluir agora.'); } delPend = null; render(); }
   else if (a === 'close') closeSheet();
   else if (a === 'start') openStart();
   else if (a === 'startok') { try { await Store.start(); } catch (x) { toast('Não foi possível iniciar agora.'); } closeSheet(); render(); toast('Caixa vazio. Pode lançar.'); }
@@ -1464,6 +1641,18 @@ document.addEventListener('click', async e => {
     if (!n) return msg('Digite o saldo de pelo menos uma conta.');
     out.innerHTML = html;
   }
+  else if (a === 'fechar') {
+    const ant = { fechadoAte: S.cfg.fechadoAte, fechamentos: S.cfg.fechamentos };
+    Object.assign(S.cfg, fecharAte(S.tx, S.cfg, S.ym, hojeISO));
+    try { await Store.saveCfg(); toast('Mês fechado'); } catch (x) { Object.assign(S.cfg, ant); toast('Não foi possível salvar agora.'); } render();
+  }
+  else if (a === 'reabrir') { S.reabrirPend = true; render(); }
+  else if (a === 'reabrirCancel') { S.reabrirPend = false; render(); }
+  else if (a === 'reabrirOk') {
+    const ant = { fechadoAte: S.cfg.fechadoAte, fechamentos: S.cfg.fechamentos };
+    Object.assign(S.cfg, reabrirUltimo(S.cfg)); S.reabrirPend = false;
+    try { await Store.saveCfg(); toast('Mês reaberto'); } catch (x) { Object.assign(S.cfg, ant); toast('Não foi possível salvar agora.'); } render();
+  }
   else if (a === 'relCsv') saveFile(relNomeArq(), relCsv(), 'Relatório');
   else if (a === 'relPrint') { try { window.print(); } catch (x) { toast('Impressão indisponível aqui. Baixe a planilha.'); } }
   else if (a === 'ctSave' || a === 'ctAdd' || a === 'ctArq' || a === 'ctDel') await acaoConta(a, el);
@@ -1484,12 +1673,12 @@ document.addEventListener('change', async e => {
     rd.onload = async () => {
       try {
         const d = JSON.parse(rd.result); if (!d || !Array.isArray(d.tx)) throw new Error('formato');
-        const ok = d.tx.filter(x => x && TIPOS[x.tipo] && /^\d{4}-\d{2}-\d{2}$/.test(x.data) && Number(x.valor) > 0);
+        const valid = d.tx.filter(x => x && TIPOS[x.tipo] && /^\d{4}-\d{2}-\d{2}$/.test(x.data) && Number(x.valor) > 0), ok = valid.filter(x => !mesFechado(S.cfg, x.data)), barrados = valid.length - ok.length;
         if (S.example) { S.tx = []; S.example = false; }
         if (d.cfg) S.cfg = mkCfg(d.cfg);
-        await Store.saveCfg();
+        await Store.saveCfg(true);
         await Store.saveMany(ok.map(x => ({ ...x, id: x.id || newId() })));
-        toast(ok.length + ' lançamentos importados'); render();
+        toast(ok.length + ' lançamentos importados' + (barrados ? ', ' + barrados + ' em meses fechados ignorados' : '')); render();
       } catch (x) { toast('Arquivo inválido. Use um backup baixado por este app.'); }
     };
     rd.readAsText(t.files[0]); t.value = '';
