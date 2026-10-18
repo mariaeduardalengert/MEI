@@ -169,7 +169,7 @@ details summary { cursor:pointer; font-weight:600; }
   header.top, nav.tabs, .fab, .noprint, .sheetbg, .toast { display:none !important; }
   .printonly { display:block !important; }
   body { background:#fff; color:#000; padding:0; }
-  .card { border:0; box-shadow:none; padding:0; background:#fff; }
+  .card { border:0; box-shadow:none; padding:0; background:#fff; break-inside:avoid; margin-bottom:14px; }
   .scroll { overflow:visible; }
   .dre { font-size:8pt; } .dre th, .dre td { padding:2px 3px; }
   .dre th:first-child, .dre td:first-child { position:static; min-width:0; }
@@ -1057,6 +1057,7 @@ function viewApur() {
   if (ap.limitadoCaixa) aviso.push(`Valor limitado para manter ${brl(c.caixaMin || 0)} de caixa mínimo nas contas e no dinheiro em espécie.`);
   if (ap.prejuizoYtd) aviso.push('Sem lucro acumulado disponível: nada a transferir.');
   return `
+  ${cabImpr('Apuração de ' + ymLabel(S.ym) + ' · emitido em ' + new Date().toLocaleDateString('pt-BR'))}
   <div class="card hi"><h2>Resultado de ${esc(ymLabel(S.ym))}</h2>
     <p class="small muted" style="margin-bottom:6px">Regime de caixa: conta o que entrou e saiu da conta corrente no mês.</p>
     <div class="steps">
@@ -1083,7 +1084,7 @@ function viewApur() {
       ${step('Falta transferir', brl(falta), falta > 0 ? 'warnc' : 'pos', 'total')}
     </div>
     ${aviso.map(a => `<div class="alert warn" style="margin-top:8px">${esc(a)}</div>`).join('')}
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+    <div class="noprint" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
       <button class="btn sm" data-act="novo" data-tipo="ret_isenta" data-valor="${ap.faltaIsento}" ${ap.faltaIsento <= 0 ? 'disabled' : ''}>Registrar isento ${ap.faltaIsento > 0 ? brl(ap.faltaIsento) : ''}</button>
       <button class="btn sm alt" data-act="novo" data-tipo="ret_trib" data-valor="${ap.faltaTrib}" ${ap.faltaTrib <= 0 ? 'disabled' : ''}>Registrar tributável ${ap.faltaTrib > 0 ? brl(ap.faltaTrib) : ''}</button>
     </div>
@@ -1095,8 +1096,9 @@ function viewApur() {
       ${porFonte.map(x => `<tr><td><i class="dot" style="background:${x.f.cor}"></i>${esc(x.f.nome)}</td><td class="r">${brl(x.rec)}</td><td class="r">${brl(x.desp)}</td><td class="r ${x.res < 0 ? 'neg' : ''}">${brl(x.res)}</td><td class="r">${x.rec ? pctf(x.res / x.rec) : '–'}</td></tr>`).join('')}
       <tr class="sum"><td>Despesas gerais e DAS</td><td class="r"></td><td class="r">${brl(r2(geral + m.das))}</td><td class="r"></td><td class="r"></td></tr>
     </tbody></table></div></div>
-  ${viewFechamento()}
-  <div class="card flat"><details><summary>Como funciona e onde está o risco</summary>
+  <div class="noprint" style="margin:0 0 12px"><button class="btn sm alt" data-act="relPrint">Imprimir ou salvar em PDF</button></div>
+  <div class="noprint">${viewFechamento()}</div>
+  <div class="card flat noprint"><details><summary>Como funciona e onde está o risco</summary>
     <div style="display:grid;gap:8px;margin-top:10px" class="small">
       <p><b>Isento tem teto.</b> Sem contabilidade formal, só é isento o lucro presumido de ${c.presuncao}% da receita de serviços${c.descontaDas ? ', menos o DAS pago' : ''}. O que passar disso é rendimento tributável na sua pessoa física. Com contador e escrituração regular, o lucro real apurado pode ser distribuído isento, o que muda o jogo se sua margem for maior que ${c.presuncao}%.</p>
       <p><b>O isento que ficou para trás volta.</b> Se em algum mês você transferiu menos que ${c.pctIsento}% do faturamento, a diferença entra na sugestão dos meses seguintes, sempre dentro do teto do ano. Em dezembro o teto zera para o ano seguinte, então o que não foi transferido até lá deixa de poder ser isento.</p>
